@@ -1,124 +1,65 @@
-# 🚀 Deploy SUPER NOVA AUTH su Vercel
+# 🚀 Deploy SUPER NOVA KEYS su Vercel (con Neon PostgreSQL)
 
 ## Prerequisiti
-- Account Vercel (gratuito): https://vercel.com
-- Account GitHub (per connettere il repository)
-- Progetto Supabase configurato
+- Account Vercel: https://vercel.com
+- Account GitHub: https://github.com
+- Database Neon PostgreSQL (già configurato)
 
-## 📋 Passi per il Deploy
+---
 
-### 1. Crea un Repository su GitHub
+## 📋 Passi per il Deploy su GitHub e Vercel
+
+### 1. Crea un nuovo repository su GitHub
 1. Vai su https://github.com/new
-2. Crea un nuovo repository (pubblico o privato)
-3. NON inizializzare con README (lo hai già)
+2. Inserisci il nome del repository (es. `supernova-auth`)
+3. Scegli se renderlo Pubblico o Privato
+4. **NON** spuntare "Add README", "Add .gitignore" o licenze (il progetto è già pronto)
+5. Clicca su **Create repository**
 
-### 2. Collega il Repository Locale a GitHub
+---
+
+### 2. Collega il repository locale e fai il Push
+
+Apri il terminale nella cartella del progetto ed esegui:
+
 ```bash
-git remote add origin https://github.com/TUO-USERNAME/TUO-REPO.git
+git remote add origin https://github.com/TUO_USERNAME/NOME_REPO.git
 git branch -M main
 git push -u origin main
 ```
 
-### 3. Deploy su Vercel
+*(Se hai un token di accesso personale o utilizzi SSH, usa l'URL corrispondente).*
 
-#### Opzione A: Via Web (Consigliato)
-1. Vai su https://vercel.com
-2. Clicca "Add New Project"
-3. Importa il tuo repository GitHub
-4. Vercel rileverà automaticamente Vite
-5. **IMPORTANTE**: Aggiungi le variabili d'ambiente:
-   - `VITE_SUPABASE_URL` = il tuo URL Supabase
-   - `VITE_SUPABASE_ANON_KEY` = la tua chiave pubblica Supabase
-6. Clicca "Deploy"
+---
 
-#### Opzione B: Via CLI
-```bash
-# Installa Vercel CLI
-npm install -g vercel
+### 3. Deploy del Progetto su Vercel
 
-# Login a Vercel
-vercel login
+1. Vai su [https://vercel.com/dashboard](https://vercel.com/dashboard)
+2. Clicca su **Add New...** -> **Project**
+3. Seleziona e importa il repository GitHub appena creato
+4. Vercel rileverà automaticamente il framework Vite e le API serverless in `api/index.ts`
+5. Nella sezione **Environment Variables**, inserisci le seguenti variabili:
 
-# Deploy
-vercel
+| Nome Variabile | Valore |
+|---|---|
+| `DATABASE_URL` | `postgresql://neondb_owner:npg_L6kjf7KotVlT@ep-curly-fire-b4xkww93-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require` |
+| `JWT_SECRET` | `supernova_auth_jwt_secret_key_2026_super_secure!` |
+| `NODE_ENV` | `production` |
 
-# Aggiungi le variabili d'ambiente
-vercel env add VITE_SUPABASE_URL
-vercel env add VITE_SUPABASE_ANON_KEY
+6. Clicca su **Deploy**!
 
-# Deploy in produzione
-vercel --prod
-```
+---
 
-## 🔧 Configurazione Supabase
+## 🎯 Cosa fa Vercel automaticamente
 
-### Deploy delle Funzioni Serverless
-Le funzioni in `supabase/functions/` devono essere deployate su Supabase:
+- **Frontend React**: Compilato in bundle statico ad alte prestazioni e distribuito sulla CDN globale di Vercel.
+- **Backend Express & API**: Eseguito come funzione serverless Node.js all'endpoint `/api/*` e `/functions/*`.
+- **Database Neon**: Connesso in pooling sicuro SSL a Neon PostgreSQL.
+- **Client C++ / Loader**: Possono interrogare direttamente `https://tuo-progetto.vercel.app/api/v1/validate-license` e `https://tuo-progetto.vercel.app/api/v1/latest-version`.
 
-```bash
-# Installa Supabase CLI
-npm install -g supabase
+---
 
-# Login
-supabase login
-
-# Link al progetto
-supabase link --project-ref TUO-PROJECT-ID
-
-# Deploy tutte le funzioni
-supabase functions deploy admin-licenses
-supabase functions deploy validate-license
-supabase functions deploy reset-hwid
-supabase functions deploy latest-version
-```
-
-### Applica le Migrazioni Database
-```bash
-# Applica le migrazioni
-supabase db push
-```
-
-## ⚙️ Variabili d'Ambiente Necessarie
-
-### Su Vercel:
-- `VITE_SUPABASE_URL` - URL del progetto Supabase
-- `VITE_SUPABASE_ANON_KEY` - Chiave anonima/pubblica di Supabase
-
-### Su Supabase (per le funzioni):
-- Già configurate automaticamente da Supabase
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_ANON_KEY`
-
-## 🎯 Dopo il Deploy
-
-1. Verifica che l'app si apra correttamente
-2. Prova il login/registrazione
-3. Testa la creazione di una licenza con nome custom
-4. Controlla che il formato sia: `SUPER-NOVA-{CUSTOM-NAME}`
-
-## 🔒 Sicurezza
-
-- Il file `.env` NON viene caricato su Git (è in `.gitignore`)
-- Le variabili d'ambiente sono configurate separatamente su Vercel
-- Le chiavi segrete sono protette
-
-## 📝 Note
-
-- Il deploy su Vercel è gratuito per progetti personali
-- Gli aggiornamenti sono automatici: ogni push su `main` triggera un nuovo deploy
-- Vercel genera automaticamente preview per ogni branch/PR
-
-## 🆘 Troubleshooting
-
-### Build fallisce
-- Verifica che `node_modules` non sia nel repository
-- Controlla che tutte le dipendenze siano in `package.json`
-
-### App mostra schermata bianca
-- Verifica che le variabili d'ambiente `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` siano configurate su Vercel
-- Controlla la console del browser per errori
-
-### Funzioni Supabase non funzionano
-- Verifica di aver fatto il deploy delle funzioni con `supabase functions deploy`
-- Controlla i log su Supabase Dashboard
+## 🔑 Credenziali Utente Predefinite
+- **Email**: `admin@supernova.com`
+- **Password**: `admin`
+*(Puoi cambiare la password o creare nuovi utenti dal pannello Settings)*
