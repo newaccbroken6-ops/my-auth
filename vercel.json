@@ -5,18 +5,18 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "/api/index.ts"
+      "destination": "/api"
     },
     {
       "source": "/api",
-      "destination": "/api/index.ts"
+      "destination": "/api"
     },
     {
       "source": "/functions/(.*)",
-      "destination": "/api/index.ts"
+      "destination": "/api"
     },
     {
-      "source": "/((?!api|functions|uploads).*)",
+      "source": "/((?!api|functions).*)",
       "destination": "/index.html"
     }
   ]

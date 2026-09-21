@@ -1,7 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'path';
-import fs from 'fs';
 import dotenv from 'dotenv';
 import authRouter from './routes/auth.js';
 import applicationsRouter from './routes/applications.js';
@@ -17,13 +15,6 @@ dotenv.config();
 
 const app = express();
 
-// Ensure upload folders exist
-const uploadsDir = path.join(process.cwd(), 'uploads');
-const avatarsDir = path.join(uploadsDir, 'avatars');
-if (!fs.existsSync(avatarsDir)) {
-  fs.mkdirSync(avatarsDir, { recursive: true });
-}
-
 // Middleware
 app.use(cors({
   origin: '*',
@@ -34,37 +25,30 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static upload files
-app.use('/uploads', express.static(uploadsDir));
+const apiRouter = express.Router();
 
 // Healthcheck
-app.get('/api/health', (_req, res) => {
+apiRouter.get('/health', (_req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString(), database: 'Neon PostgreSQL' });
 });
 
-// Mount API routes
-app.use('/api/auth', authRouter);
-app.use('/api/applications', applicationsRouter);
-app.use('/api/licenses', licensesRouter);
-app.use('/api/hwid', hwidRouter);
-app.use('/api/logs', logsRouter);
-app.use('/api/users', usersRouter);
-app.use('/api/versions', versionsRouter);
-app.use('/api/stats', statsRouter);
-app.use('/api/v1', clientRouter);
+// Mount sub-routers on apiRouter
+apiRouter.use('/auth', authRouter);
+apiRouter.use('/applications', applicationsRouter);
+apiRouter.use('/licenses', licensesRouter);
+apiRouter.use('/hwid', hwidRouter);
+apiRouter.use('/logs', logsRouter);
+apiRouter.use('/users', usersRouter);
+apiRouter.use('/versions', versionsRouter);
+apiRouter.use('/stats', statsRouter);
+apiRouter.use('/v1', clientRouter);
 
-// Public root API shortcuts for C++ client compatibility
-app.post('/api/validate-license', handleValidateLicense);
-app.all('/api/latest-version', handleLatestVersion);
-
-// Supabase Functions Backward Compatibility Routes
-app.post('/functions/v1/validate-license', handleValidateLicense);
-app.all('/functions/v1/latest-version', handleLatestVersion);
-app.use('/functions/v1/reset-hwid', hwidRouter);
-app.use('/functions/v1/admin-licenses', licensesRouter);
+// Public shortcuts
+apiRouter.post('/validate-license', handleValidateLicense);
+apiRouter.all('/latest-version', handleLatestVersion);
 
 // Root route
-app.get('/api', (_req, res) => {
+apiRouter.get('/', (_req, res) => {
   res.json({
     name: 'SUPER NOVA KEYS API',
     version: '2.0.0',
@@ -83,6 +67,16 @@ app.get('/api', (_req, res) => {
     }
   });
 });
+
+// Supabase Functions Backward Compatibility Routes
+app.post('/functions/v1/validate-license', handleValidateLicense);
+app.all('/functions/v1/latest-version', handleLatestVersion);
+app.use('/functions/v1/reset-hwid', hwidRouter);
+app.use('/functions/v1/admin-licenses', licensesRouter);
+
+// Mount API router on /api and root fallback
+app.use('/api', apiRouter);
+app.use('/', apiRouter);
 
 // Global error handler
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

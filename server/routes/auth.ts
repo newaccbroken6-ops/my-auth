@@ -1,33 +1,12 @@
 import { Router, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
 import { query } from '../db.js';
 import { authenticateToken, generateToken, AuthRequest } from '../auth.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const router = Router();
 
-// Configure avatar upload storage
-const uploadDir = path.join(process.cwd(), 'uploads', 'avatars');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req: AuthRequest, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || '.png';
-    const uniqueName = `${req.user?.id || 'user'}_${Date.now()}${ext}`;
-    cb(null, uniqueName);
-  },
-});
+const storage = multer.memoryStorage();
 
 const upload = multer({
   storage,
@@ -184,17 +163,17 @@ router.post('/avatar', authenticateToken, upload.single('avatar'), async (req: A
       return res.status(400).json({ error: 'No image file uploaded' });
     }
 
-    const publicUrl = `/uploads/avatars/${req.file.filename}`;
+    const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
     const result = await query(
       `UPDATE profiles 
        SET avatar_url = $1, updated_at = now() 
        WHERE id = $2 
        RETURNING id, email, username, role, is_banned, ban_reason, avatar_url`,
-      [publicUrl, req.user!.id]
+      [base64Image, req.user!.id]
     );
 
     return res.json({
-      publicUrl,
+      publicUrl: base64Image,
       user: result.rows[0],
     });
   } catch (err: any) {
