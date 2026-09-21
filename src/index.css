@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Theme colors CSS variables */
+  :root[data-theme="cyan"] { --theme-primary: #06b6d4; }
+  :root[data-theme="blue"] { --theme-primary: #3b82f6; }
+  :root[data-theme="purple"] { --theme-primary: #a855f7; }
+  :root[data-theme="pink"] { --theme-primary: #ec4899; }
+  :root[data-theme="red"] { --theme-primary: #ef4444; }
+  :root[data-theme="orange"] { --theme-primary: #f97316; }
+  :root[data-theme="yellow"] { --theme-primary: #eab308; }
+  :root[data-theme="green"] { --theme-primary: #22c55e; }
+  :root[data-theme="emerald"] { --theme-primary: #10b981; }
+  :root[data-theme="teal"] { --theme-primary: #14b8a6; }
+  :root[data-theme="indigo"] { --theme-primary: #6366f1; }
+  :root[data-theme="violet"] { --theme-primary: #8b5cf6; }
+  :root[data-theme="rose"] { --theme-primary: #f43f5e; }
+  :root[data-theme="slate"] { --theme-primary: #64748b; }
+}
+
+@layer utilities {
+  /* Smooth scrollbar */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: rgba(31, 41, 55, 0.5);
+    border-radius: 10px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(6, 182, 212, 0.5);
+    border-radius: 10px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: rgba(6, 182, 212, 0.7);
+  }
+
+  /* Glow effects */
+  .glow-cyan {
+    box-shadow: 0 0 20px rgba(6, 182, 212, 0.3);
+  }
+  
+  .glow-cyan-lg {
+    box-shadow: 0 0 40px rgba(6, 182, 212, 0.4);
+  }
+  
+  .glow-purple {
+    box-shadow: 0 0 20px rgba(168, 85, 247, 0.3);
+  }
+
+  /* Gradient animations */
+  .gradient-shift {
+    background-size: 200% 200%;
+    animation: gradient-shift 3s ease infinite;
+  }
+
+  @keyframes gradient-shift {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  /* Floating animation */
+  .floating {
+    animation: floating 3s ease-in-out infinite;
+  }
+
+  @keyframes floating {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
+  }
+
+  /* Fade in animation */
+  .fade-in {
+    animation: fadeIn 0.5s ease-in;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  /* Slide up animation */
+  .slide-up {
+    animation: slideUp 0.5s ease-out;
+  }
+
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Scale in animation */
+  .scale-in {
+    animation: scaleIn 0.3s ease-out;
+  }
+
+  @keyframes scaleIn {
+    from {
+      opacity: 0;
+      transform: scale(0.9);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+}
+
