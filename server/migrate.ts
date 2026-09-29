@@ -78,6 +78,16 @@ export async function runMigrations() {
             WHEN duplicate_object THEN NULL;
           END;
         END IF;
+
+        ALTER TABLE licenses ADD COLUMN IF NOT EXISTS hwid_enabled BOOLEAN NOT NULL DEFAULT true;
+
+        CREATE TABLE IF NOT EXISTS banned_ips (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          ip_address TEXT UNIQUE NOT NULL,
+          reason TEXT,
+          created_by UUID REFERENCES profiles(id) ON DELETE SET NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
       END $$;
     `);
 

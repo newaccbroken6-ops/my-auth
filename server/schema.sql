@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS licenses (
   license_type TEXT NOT NULL DEFAULT 'monthly' CHECK (license_type IN ('daily', 'monthly', 'lifetime')),
   expires_at TIMESTAMPTZ,
   note TEXT,
+  hwid_enabled BOOLEAN NOT NULL DEFAULT true,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -108,3 +109,15 @@ CREATE TABLE IF NOT EXISTS rate_limit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rate_limit_identifier ON rate_limit_log(identifier, endpoint);
+
+-- BANNED IPS
+CREATE TABLE IF NOT EXISTS banned_ips (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ip_address TEXT UNIQUE NOT NULL,
+  reason TEXT,
+  created_by UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_banned_ips_address ON banned_ips(ip_address);
+

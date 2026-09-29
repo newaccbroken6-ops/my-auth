@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme, themes, Theme } from '../contexts/ThemeContext';
-import { api } from '../lib/api';
-import { User, Copy, Check, Loader2, Code, BookOpen, Camera, Palette } from 'lucide-react';
+import { api, BannedIp } from '../lib/api';
+import { User, Copy, Check, Loader2, Code, BookOpen, Camera, Palette, Shield, Trash2, Plus, Ban } from 'lucide-react';
 
 export default function SettingsPage() {
   const { user, profile, refreshProfile } = useAuth();
@@ -12,9 +12,63 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState<string | null>(null);
-  const [tab, setTab] = useState<'profile' | 'sdk'>('profile');
+  const [tab, setTab] = useState<'profile' | 'sdk' | 'banned_ips'>('profile');
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
+
+  // Banned IPs State
+  const [bannedIps, setBannedIps] = useState<BannedIp[]>([]);
+  const [loadingBanned, setLoadingBanned] = useState(false);
+  const [newIp, setNewIp] = useState('');
+  const [newReason, setNewReason] = useState('');
+  const [banning, setBanning] = useState(false);
+  const [banError, setBanError] = useState('');
+
+  async function loadBannedIps() {
+    if (user?.role !== 'admin') return;
+    setLoadingBanned(true);
+    try {
+      const ips = await api.getBannedIps();
+      setBannedIps(ips || []);
+    } catch (err) {
+      console.error('Failed to load banned IPs:', err);
+    } finally {
+      setLoadingBanned(false);
+    }
+  }
+
+  useEffect(() => {
+    if (tab === 'banned_ips') {
+      loadBannedIps();
+    }
+  }, [tab]);
+
+  async function handleAddBan(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newIp.trim()) return;
+    setBanning(true);
+    setBanError('');
+    try {
+      await api.banIp(newIp.trim(), newReason.trim() || undefined);
+      setNewIp('');
+      setNewReason('');
+      await loadBannedIps();
+    } catch (err: any) {
+      setBanError(err.message || 'Failed to ban IP address');
+    } finally {
+      setBanning(false);
+    }
+  }
+
+  async function handleUnban(id: string) {
+    if (!confirm('Sei sicuro di voler SBIANCARE (unban) questo indirizzo IP?')) return;
+    try {
+      await api.unbanIp(id);
+      await loadBannedIps();
+    } catch (err: any) {
+      alert(`Failed to unban IP: ${err.message}`);
+    }
+  }
 
   async function saveProfile() {
     if (!username.trim()) return;
@@ -191,6 +245,19 @@ print(result)`;
           <Code className="w-4 h-4" />
           API & SDK Integration
         </button>
+        {user?.role === 'admin' && (
+          <button
+            onClick={() => setTab('banned_ips')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+              tab === 'banned_ips'
+                ? 'bg-red-500/20 border border-red-500 text-red-400'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            <Shield className="w-4 h-4" />
+            Banned IPs & Security
+          </button>
+        )}
       </div>
 
       {tab === 'profile' && (
@@ -343,6 +410,101 @@ print(result)`;
             <pre className="p-4 bg-black/60 rounded-xl overflow-x-auto font-mono text-xs text-gray-300 leading-relaxed">
               <code>{pythonCode}</code>
             </pre>
+          </div>
+        </div>
+      )}
+
+      {tab === 'banned_ips' && user?.role === 'admin' && (
+        <div className="space-y-6">
+          {/* Add Ban Form */}
+          <div className="bg-gray-900/60 border border-gray-800 rounded-2xl p-6">
+            <h2 className="text-lg font-bold text-white mb-2 flex items-center gap-2">
+              <Ban className="w-5 h-5 text-red-400" />
+              Kick & Ban IP Address
+            </h2>
+            <p className="text-gray-400 text-sm mb-4">
+              Banning an IP address prevents any user or device at that IP from validating licenses or calling the API.
+            </p>
+            <form onSubmit={handleAddBan} className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={newIp}
+                onChange={e => setNewIp(e.target.value)}
+                placeholder="IP Address (e.g. 192.168.1.50 or 1.2.3.4)"
+                required
+                className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-red-500 flex-1 font-mono"
+              />
+              <input
+                type="text"
+                value={newReason}
+                onChange={e => setNewReason(e.target.value)}
+                placeholder="Reason (optional)..."
+                className="bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-white placeholder-gray-500 text-sm focus:outline-none focus:border-red-500 flex-1"
+              />
+              <button
+                type="submit"
+                disabled={banning}
+                className="px-5 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-medium text-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {banning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                {banning ? 'Banning...' : 'Ban IP'}
+              </button>
+            </form>
+            {banError && <p className="text-xs text-red-400 mt-2">{banError}</p>}
+          </div>
+
+          {/* Banned IPs Table */}
+          <div className="bg-gray-900/60 border border-gray-800 rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
+              <h3 className="text-white font-bold text-base flex items-center gap-2">
+                <Shield className="w-5 h-5 text-red-400" />
+                Active IP Blacklist ({bannedIps.length})
+              </h3>
+              <button
+                onClick={loadBannedIps}
+                className="text-xs text-gray-400 hover:text-white transition-colors"
+              >
+                Refresh
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-gray-800">
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Address</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Banned By</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date Banned</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800/50">
+                  {loadingBanned ? (
+                    <tr><td colSpan={5} className="p-6 text-center text-gray-500">Loading blacklist...</td></tr>
+                  ) : bannedIps.length === 0 ? (
+                    <tr><td colSpan={5} className="p-8 text-center text-gray-500">No banned IP addresses found</td></tr>
+                  ) : (
+                    bannedIps.map(item => (
+                      <tr key={item.id} className="hover:bg-gray-800/20 transition-colors">
+                        <td className="px-4 py-3 font-mono text-red-400 text-sm font-semibold">{item.ip_address}</td>
+                        <td className="px-4 py-3 text-gray-300 text-sm">{item.reason || '—'}</td>
+                        <td className="px-4 py-3 text-gray-400 text-xs">{item.created_by_username || item.created_by_email || 'Admin'}</td>
+                        <td className="px-4 py-3 text-gray-400 text-xs font-mono">{new Date(item.created_at).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            onClick={() => handleUnban(item.id)}
+                            className="px-3 py-1.5 rounded-lg border border-gray-700 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white text-xs font-medium transition-colors flex items-center gap-1.5 ml-auto"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-emerald-400" />
+                            Unban
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

@@ -35,7 +35,7 @@ const TYPE_CONFIG = {
   lifetime: { label: 'Lifetime', color: 'text-violet-400 bg-violet-500/10 border-violet-500/20' },
 };
 
-function FormFields<T extends { app_id: string; license_type: string; note: string; custom_name: string }>({ 
+function FormFields<T extends { app_id: string; license_type: string; note: string; custom_name: string; hwid_enabled: boolean }>({ 
   f, 
   setF, 
   apps 
@@ -57,6 +57,32 @@ function FormFields<T extends { app_id: string; license_type: string; note: stri
           {apps.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
       </div>
+
+      <div>
+        <label className="block text-sm text-gray-400 mb-1.5">HWID Binding (Dispositivo)</label>
+        <div className="flex items-center gap-3 bg-gray-800/60 border border-gray-700 rounded-xl p-3">
+          <input
+            type="checkbox"
+            id="hwid_enabled_checkbox"
+            checked={f.hwid_enabled}
+            onChange={e => setF(prev => ({ ...prev, hwid_enabled: e.target.checked }))}
+            className="w-4 h-4 text-cyan-500 rounded border-gray-600 bg-gray-900 focus:ring-cyan-500 focus:ring-offset-gray-900 cursor-pointer"
+          />
+          <label htmlFor="hwid_enabled_checkbox" className="text-sm cursor-pointer select-none">
+            {f.hwid_enabled ? (
+              <span className="text-gray-300 font-medium">🔒 Blocco Singolo PC (HWID Standard)</span>
+            ) : (
+              <span className="text-emerald-400 font-semibold">🌐 CHIAVE PER TUTTI SENZA HWID (Multi-Dispositivo)</span>
+            )}
+          </label>
+        </div>
+        <p className="text-xs text-gray-500 mt-1">
+          {f.hwid_enabled 
+            ? 'La chiave si legherà al primo PC che la utilizza.'
+            : 'Togli il blocco HWID per permettere a CHIUNQUE di usare la stessa chiave senza restrizioni!'}
+        </p>
+      </div>
+
       <div>
         <label className="block text-sm text-gray-400 mb-1.5">License Type</label>
         <div className="grid grid-cols-3 gap-2">
@@ -114,8 +140,8 @@ export default function LicensesPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [form, setForm] = useState({ app_id: '', license_type: 'monthly', note: '', custom_name: '' });
-  const [bulkForm, setBulkForm] = useState({ app_id: '', license_type: 'monthly', count: 5, note: '', custom_name: '' });
+  const [form, setForm] = useState({ app_id: '', license_type: 'monthly', note: '', custom_name: '', hwid_enabled: true });
+  const [bulkForm, setBulkForm] = useState({ app_id: '', license_type: 'monthly', count: 5, note: '', custom_name: '', hwid_enabled: true });
   const [bulkResult, setBulkResult] = useState<License[] | null>(null);
   const [showDeleteAll, setShowDeleteAll] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
@@ -169,9 +195,10 @@ export default function LicensesPage() {
         license_type: form.license_type,
         note: form.note.trim() || undefined,
         custom_name: form.custom_name.trim() || undefined,
+        hwid_enabled: form.hwid_enabled,
       });
       setShowCreate(false);
-      setForm({ app_id: '', license_type: 'monthly', note: '', custom_name: '' });
+      setForm({ app_id: '', license_type: 'monthly', note: '', custom_name: '', hwid_enabled: true });
       load();
     } catch (err: any) {
       setError(err.message || 'Failed to create license');
@@ -190,6 +217,7 @@ export default function LicensesPage() {
         count: bulkForm.count,
         note: bulkForm.note.trim() || undefined,
         custom_name: bulkForm.custom_name.trim() || undefined,
+        hwid_enabled: bulkForm.hwid_enabled,
       });
       setBulkResult(data.licenses);
       load();
@@ -360,9 +388,15 @@ export default function LicensesPage() {
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <Cpu className="w-3.5 h-3.5 text-gray-500" />
-                          <span className="text-gray-400 text-xs font-mono">
-                            {lic.hwid ? `${lic.hwid.slice(0, 10)}...` : 'Unbound'}
-                          </span>
+                          {lic.hwid_enabled === false ? (
+                            <span className="text-emerald-400 text-xs font-semibold bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-lg">
+                              🔓 No HWID (Tutti)
+                            </span>
+                          ) : (
+                            <span className="text-gray-400 text-xs font-mono">
+                              {lic.hwid ? `${lic.hwid.slice(0, 10)}...` : 'Unbound'}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="px-4 py-3">

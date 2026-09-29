@@ -148,7 +148,28 @@ export default function LogsPage() {
                       {log.app_name || log.username || log.user_email || '—'}
                     </td>
                     <td className="px-4 py-3 text-gray-400 text-sm font-mono">
-                      {log.ip_address ?? <span className="text-gray-600">—</span>}
+                      <div className="flex items-center gap-2">
+                        <span>{log.ip_address ?? '—'}</span>
+                        {log.ip_address && log.ip_address !== '—' && log.ip_address !== '127.0.0.1' && (
+                          <button
+                            onClick={async () => {
+                              if (confirm(`Vuoi BANNARE l'IP ${log.ip_address}?`)) {
+                                try {
+                                  await api.banIp(log.ip_address, `Banned from logs: ${log.event_type}`);
+                                  alert(`IP ${log.ip_address} BANNATO con successo!`);
+                                  load();
+                                } catch (e: any) {
+                                  alert(`Errore: ${e.message}`);
+                                }
+                              }
+                            }}
+                            className="p-1 rounded hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors"
+                            title="Ban IP"
+                          >
+                            <Shield className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-gray-400 text-xs font-mono max-w-32 truncate">
                       {log.hwid ?? <span className="text-gray-600">—</span>}

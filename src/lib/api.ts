@@ -34,6 +34,7 @@ export interface License {
   license_type: 'daily' | 'monthly' | 'lifetime';
   expires_at: string | null;
   note: string | null;
+  hwid_enabled?: boolean;
   created_at: string;
   app_name?: string;
   hwid?: string | null;
@@ -63,6 +64,16 @@ export interface ActivityLog {
   app_name?: string;
   username?: string | null;
   user_email?: string | null;
+}
+
+export interface BannedIp {
+  id: string;
+  ip_address: string;
+  reason: string | null;
+  created_by: string | null;
+  created_at: string;
+  created_by_username?: string | null;
+  created_by_email?: string | null;
 }
 
 export interface AppVersion {
@@ -413,6 +424,24 @@ class ApiClient {
 
   async pingApi(): Promise<{ status: 'connected' | 'disconnected'; ping: number }> {
     return this.request('/api/stats/ping-api');
+  }
+
+  // Banned IPs
+  async getBannedIps(): Promise<BannedIp[]> {
+    return this.request('/api/banned-ips');
+  }
+
+  async banIp(ip_address: string, reason?: string): Promise<{ success: boolean; message: string; bannedIp: BannedIp }> {
+    return this.request('/api/banned-ips', {
+      method: 'POST',
+      body: JSON.stringify({ ip_address, reason }),
+    });
+  }
+
+  async unbanIp(id: string): Promise<{ success: boolean; message: string }> {
+    return this.request(`/api/banned-ips/${id}`, {
+      method: 'DELETE',
+    });
   }
 }
 

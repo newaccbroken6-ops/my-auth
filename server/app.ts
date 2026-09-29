@@ -10,6 +10,7 @@ import usersRouter from './routes/users.js';
 import versionsRouter from './routes/versions.js';
 import clientRouter, { handleValidateLicense, handleLatestVersion } from './routes/client.js';
 import statsRouter from './routes/stats.js';
+import bannedIpsRouter from './routes/banned-ips.js';
 
 dotenv.config();
 
@@ -41,6 +42,7 @@ apiRouter.use('/logs', logsRouter);
 apiRouter.use('/users', usersRouter);
 apiRouter.use('/versions', versionsRouter);
 apiRouter.use('/stats', statsRouter);
+apiRouter.use('/banned-ips', bannedIpsRouter);
 apiRouter.use('/v1', clientRouter);
 
 // Public shortcuts

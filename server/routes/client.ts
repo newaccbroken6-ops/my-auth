@@ -10,7 +10,22 @@ const RATE_LIMIT_MAX_REQUESTS = 10;
 export async function handleValidateLicense(req: Request, res: Response) {
   try {
     const { license_key, hwid, app_id } = req.body;
-    const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+    const ip = ((req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
+
+    // Check if IP is in banned_ips table
+    const banCheckRes = await query('SELECT id, reason FROM banned_ips WHERE ip_address = $1', [ip]);
+    if (banCheckRes.rows.length > 0) {
+      await query(
+        `INSERT INTO activity_logs (app_id, event_type, ip_address, hwid, metadata)
+         VALUES ($1, 'ip_blocked', $2, $3, $4)`,
+        [app_id || null, ip, hwid || null, JSON.stringify({ reason: banCheckRes.rows[0].reason })]
+      );
+      return res.status(403).json({
+        valid: false,
+        message: `Access denied: Your IP address (${ip}) has been kicked and banned.`,
+        banned: true,
+      });
+    }
 
     if (!license_key || !app_id) {
       return res.status(400).json({ valid: false, message: 'Missing license_key or app_id' });
@@ -48,7 +63,7 @@ export async function handleValidateLicense(req: Request, res: Response) {
 
     // Fetch license
     const licRes = await query(
-      `SELECT id, status, license_type, expires_at, app_id 
+      `SELECT id, status, license_type, expires_at, app_id, hwid_enabled 
        FROM licenses 
        WHERE license_key = $1 AND app_id = $2`,
       [license_key, app_id]
@@ -87,8 +102,8 @@ export async function handleValidateLicense(req: Request, res: Response) {
       return res.status(200).json({ valid: false, message: `License is ${license.status}` });
     }
 
-    // HWID binding
-    if (hwid) {
+    // HWID binding (only checked if hwid_enabled is true)
+    if (hwid && license.hwid_enabled !== false) {
       const bindingRes = await query('SELECT id, hwid FROM hwid_bindings WHERE license_id = $1', [license.id]);
       if (bindingRes.rows.length > 0) {
         const binding = bindingRes.rows[0];

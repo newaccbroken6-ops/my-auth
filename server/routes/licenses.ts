@@ -85,7 +85,7 @@ router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
 // POST /api/licenses/bulk (or generate)
 router.post('/bulk', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { app_id, license_type = 'monthly', count = 1, note, custom_name } = req.body;
+    const { app_id, license_type = 'monthly', count = 1, note, custom_name, hwid_enabled = true } = req.body;
     const user = req.user!;
 
     if (!app_id) {
@@ -111,6 +111,7 @@ router.post('/bulk', authenticateToken, async (req: AuthRequest, res: Response) 
 
     const generateCount = Math.min(Math.max(parseInt(String(count), 10) || 1, 1), 100);
     const createdLicenses: any[] = [];
+    const isHwidEnabled = hwid_enabled !== false;
 
     for (let i = 0; i < generateCount; i++) {
       let keyName: string | undefined;
@@ -132,10 +133,10 @@ router.post('/bulk', authenticateToken, async (req: AuthRequest, res: Response) 
       const expiresAt = calculateExpiresAt(license_type);
 
       const insRes = await query(
-        `INSERT INTO licenses (app_id, owner_id, license_key, status, license_type, expires_at, note)
-         VALUES ($1, $2, $3, 'active', $4, $5, $6)
+        `INSERT INTO licenses (app_id, owner_id, license_key, status, license_type, expires_at, note, hwid_enabled)
+         VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
          RETURNING *`,
-        [app_id, user.id, licenseKey, license_type, expiresAt, note ? note.trim() : null]
+        [app_id, user.id, licenseKey, license_type, expiresAt, note ? note.trim() : null, isHwidEnabled]
       );
 
       createdLicenses.push(insRes.rows[0]);
@@ -145,7 +146,7 @@ router.post('/bulk', authenticateToken, async (req: AuthRequest, res: Response) 
     await query(
       `INSERT INTO activity_logs (app_id, user_id, event_type, metadata)
        VALUES ($1, $2, 'bulk_generate', $3)`,
-      [app_id, user.id, JSON.stringify({ count: generateCount, license_type })]
+      [app_id, user.id, JSON.stringify({ count: generateCount, license_type, hwid_enabled: isHwidEnabled })]
     );
 
     return res.status(201).json({
@@ -163,7 +164,7 @@ router.post('/bulk', authenticateToken, async (req: AuthRequest, res: Response) 
 router.post('/', authenticateToken, async (req: AuthRequest, res: Response) => {
   req.body.count = 1;
   try {
-    const { app_id, license_type = 'monthly', note, custom_name } = req.body;
+    const { app_id, license_type = 'monthly', note, custom_name, hwid_enabled = true } = req.body;
     const user = req.user!;
 
     if (!app_id) {
@@ -189,12 +190,13 @@ router.post('/', authenticateToken, async (req: AuthRequest, res: Response) => {
 
     const licenseKey = generateLicenseKey(keyName);
     const expiresAt = calculateExpiresAt(license_type);
+    const isHwidEnabled = hwid_enabled !== false;
 
     const insRes = await query(
-      `INSERT INTO licenses (app_id, owner_id, license_key, status, license_type, expires_at, note)
-       VALUES ($1, $2, $3, 'active', $4, $5, $6)
+      `INSERT INTO licenses (app_id, owner_id, license_key, status, license_type, expires_at, note, hwid_enabled)
+       VALUES ($1, $2, $3, 'active', $4, $5, $6, $7)
        RETURNING *`,
-      [app_id, user.id, licenseKey, license_type, expiresAt, note ? note.trim() : null]
+      [app_id, user.id, licenseKey, license_type, expiresAt, note ? note.trim() : null, isHwidEnabled]
     );
 
     return res.status(201).json(insRes.rows[0]);
@@ -208,7 +210,7 @@ router.post('/', authenticateToken, async (req: AuthRequest, res: Response) => {
 router.put('/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { status, note, expires_at } = req.body;
+    const { status, note, expires_at, hwid_enabled } = req.body;
     const user = req.user!;
 
     const checkRes = await query(
@@ -243,6 +245,10 @@ router.put('/:id', authenticateToken, async (req: AuthRequest, res: Response) =>
     if (expires_at !== undefined) {
       updates.push(`expires_at = $${idx++}`);
       params.push(expires_at);
+    }
+    if (hwid_enabled !== undefined) {
+      updates.push(`hwid_enabled = $${idx++}`);
+      params.push(Boolean(hwid_enabled));
     }
 
     if (updates.length === 0) {
