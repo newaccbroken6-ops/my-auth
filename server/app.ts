@@ -23,9 +23,6 @@ import bannedIpsRouter from './routes/banned-ips.js';
 
 dotenv.config();
 
-// Synchronize WAF banned IP perimeter cache on boot
-syncBannedIpsCache().catch((err) => console.error('[BOOT] Failed initial banned IPs sync:', err));
-
 const app = express();
 
 // Disable Express fingerprint
@@ -47,11 +44,11 @@ app.use(wafMiddleware);
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim().toLowerCase())
   : [
-      'https://supernova-keys.vercel.app',
-      'http://localhost:5173',
-      'http://localhost:3000',
-      'http://localhost:3001',
-    ];
+    'https://my-auth-kohl.vercel.app',
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:3001',
+  ];
 
 app.use(
   cors({

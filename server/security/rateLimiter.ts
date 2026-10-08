@@ -25,19 +25,22 @@ export function createRateLimiter(options: RateLimiterOptions) {
     skip = () => false,
   } = options;
 
-  // Cleanup old keys every 5 minutes to avoid memory leaks
-  setInterval(() => {
+  let lastCleanup = Date.now();
+  const cleanup = () => {
     const now = Date.now();
+    if (now - lastCleanup < 60 * 1000) return;
+    lastCleanup = now;
     for (const [key, record] of store.entries()) {
       record.timestamps = record.timestamps.filter((ts) => now - ts < windowMs);
       if (record.timestamps.length === 0) {
         store.delete(key);
       }
     }
-  }, 5 * 60 * 1000).unref();
+  };
 
   return (req: Request, res: Response, next: NextFunction) => {
     if (skip(req)) return next();
+    cleanup();
 
     const key = keyGenerator(req);
     const now = Date.now();

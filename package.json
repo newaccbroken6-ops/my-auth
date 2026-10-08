@@ -16,7 +16,6 @@
     "start": "node --loader ./server/loader.mjs --experimental-strip-types server/index.ts"
   },
   "dependencies": {
-    "@esbuild/win32-x64": "^0.21.5",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
