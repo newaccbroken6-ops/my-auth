@@ -188,10 +188,13 @@ export function originProtectionMiddleware(req: Request, res: Response, next: Ne
     }
   }
 
-  // 3. Strip dangerous / hop-by-hop headers from untrusted sources
+  // 3. Strip dangerous / hop-by-hop headers and method tampering overrides
   delete req.headers['x-original-url'];
   delete req.headers['x-rewrite-url'];
   delete req.headers['x-forwarded-host'];
+  delete req.headers['x-http-method-override'];
+  delete req.headers['x-method-override'];
+  delete req.headers['x-http-method'];
 
   next();
 }

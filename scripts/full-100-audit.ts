@@ -395,12 +395,36 @@ async function run100Tests() {
   });
   recordTest('Authz/IDOR', 'I-05', 'Endpoint admin /api/banned-ips protetto (403)', bBannedIps.status === 403, `Status: ${bBannedIps.status}`);
 
-  // 4.6 API admin protette (/api/logs/clear)
-  const bClearLogs = await fetchApi('/api/logs/clear', {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${tokenB}` },
-  });
-  recordTest('Authz/IDOR', 'I-06', 'API admin /api/logs/clear protetta (403)', bClearLogs.status === 403, `Status: ${bClearLogs.status}`);
+  // 4.6 API admin protette (Verifica multi-endpoint con non-admin)
+  const adminEndpoints = [
+    { method: 'DELETE', path: '/api/logs/clear', name: 'logs/clear' },
+    { method: 'GET', path: '/api/stats/system', name: 'stats/system' },
+    { method: 'GET', path: '/api/users', name: 'users' },
+    { method: 'POST', path: `/api/users/${userA_Id}/ban`, name: 'users/:id/ban', body: { banned: true } },
+    { method: 'POST', path: '/api/banned-ips', name: 'banned-ips', body: { ip_address: '1.2.3.4' } },
+  ];
+  const adminProbeResults = await Promise.all(
+    adminEndpoints.map(async (ep) => {
+      const res = await fetchApi(ep.path, {
+        method: ep.method,
+        headers: {
+          Authorization: `Bearer ${tokenB}`,
+          ...(ep.body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(ep.body ? { body: JSON.stringify(ep.body) } : {}),
+      });
+      return { ...ep, status: res.status, blocked: res.status === 403 };
+    })
+  );
+  const allAdminBlocked = adminProbeResults.every((r) => r.blocked);
+  const adminSummary = adminProbeResults.map((r) => `${r.name}:${r.status}`).join(', ');
+  recordTest(
+    'Authz/IDOR',
+    'I-06',
+    'Intera superficie API admin protetta (403 su stats, users, ban, logs)',
+    allAdminBlocked,
+    `Probes: ${adminSummary}`
+  );
 
   // 4.7 Cambio userId nell'URL non bypassa autorizzazione
   const bChangeRoleUrl = await fetchApi(`/api/users/${userA_Id}/role`, {
@@ -590,11 +614,33 @@ async function run100Tests() {
   });
   recordTest('XSS', 'X-04', 'XSS tramite payload JSON bloccato (403)', xssJson.status === 403, `Status: ${xssJson.status}`);
 
-  // 6.5 XSS tramite query parameter
-  const xssQuery = await fetchApi('/api/logs?event_type=%3Cscript%3E', {
+  // 6.5 XSS tramite query parameter (multi-vettore + verifica reflection)
+  const xssParamVectors = [
+    '/api/licenses?search=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E',
+    '/api/logs?event_type=%3Csvg%2Fonload%3Dalert(1)%3E',
+    '/api/licenses?search=%22%3E%3Cscript%3Ealert(document.domain)%3C%2Fscript%3E',
+  ];
+  const xssParamResponses = await Promise.all(
+    xssParamVectors.map((url) => fetchApi(url, { headers: { Authorization: `Bearer ${tokenA}` } }))
+  );
+  const allParamsBlocked = xssParamResponses.every((res) => res.status === 403);
+
+  // Verifica che parametri sicuri non riflettano script o tag non sanificati
+  const safeParamProbe = await fetchApi('/api/logs?search=safe_probe_xss_test', {
     headers: { Authorization: `Bearer ${tokenA}` },
   });
-  recordTest('XSS', 'X-05', 'XSS tramite query parameter intercettato (403)', xssQuery.status === 403, `Status: ${xssQuery.status}`);
+  const noUnsafeReflection =
+    safeParamProbe.status === 200 &&
+    !safeParamProbe.raw.includes('<script>') &&
+    !safeParamProbe.raw.includes('onerror=');
+
+  recordTest(
+    'XSS',
+    'X-05',
+    'XSS query parameters bloccati (img/svg/script: 403) e risposte esenti da reflection',
+    allParamsBlocked && noUnsafeReflection,
+    `Vectors blocked: ${allParamsBlocked}, Reflection safe: ${noUnsafeReflection}`
+  );
 
   // 6.6 XSS tramite header
   const xssHeader = await fetchApi('/api/health', {
@@ -715,27 +761,71 @@ async function run100Tests() {
   // 8.2 Rate limit per account
   recordTest('API Abuse', 'B-02', 'Rate limit per account / lockout anti-bruteforce attivo', accountLocked, `Account-level throttle verified`);
 
-  // 8.3 Rate limit su endpoint costosi
-  const authLimiterSrc = fs.readFileSync(path.resolve(process.cwd(), 'server/security/rateLimiter.ts'), 'utf8');
-  const hasCostlyLimiter = authLimiterSrc.includes('authRateLimiter = createRateLimiter') && authLimiterSrc.includes('max: 10');
-  recordTest('API Abuse', 'B-03', 'Rate limit restrittivo (10 req/15min) su endpoint costosi di auth', hasCostlyLimiter, `authRateLimiter configured`);
+  // 8.3 Rate limit su endpoint costosi (Live HTTP stress test)
+  const probeCostlyEmail = `rl_probe_${testStamp}@example.com`;
+  let costlyThrottled = false;
+  let costlyRetryAfter: string | null = null;
+  let costlyLimit: string | null = null;
 
-  // 8.4 HTTP method tampering (TRACE / CONNECT / PROPFIND)
-  const traceStatus = await new Promise<number>((resolve) => {
-    import('http').then(({ default: http }) => {
-      const req = http.request({
-        hostname: '127.0.0.1',
-        port: 3001,
-        path: '/api/health',
-        method: 'TRACE',
-      }, (res) => {
-        resolve(res.statusCode || 0);
-      });
-      req.on('error', () => resolve(0));
-      req.end();
+  for (let i = 0; i < 12; i++) {
+    const res = await fetchApi('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: probeCostlyEmail, password: 'WrongPassword99!' }),
     });
+    if (res.status === 429) {
+      costlyThrottled = true;
+      costlyRetryAfter = res.headers.get('retry-after');
+      costlyLimit = res.headers.get('ratelimit-limit');
+      break;
+    }
+  }
+
+  recordTest(
+    'API Abuse',
+    'B-03',
+    'Rate limit su endpoint costosi attivo a caldo (429 Too Many Requests con Retry-After)',
+    costlyThrottled && !!costlyRetryAfter,
+    `Throttled: ${costlyThrottled}, Retry-After: ${costlyRetryAfter}, Limit: ${costlyLimit}`
+  );
+
+  // 8.4 HTTP method tampering (Verbi non ammessi 405 + header override neutralizzati)
+  const probeMethods = ['TRACE', 'TRACK', 'PROBE_CUSTOM'];
+  const methodStatuses = await Promise.all(
+    probeMethods.map((method) => {
+      return new Promise<number>((resolve) => {
+        import('http').then(({ default: http }) => {
+          const req = http.request(
+            { hostname: '127.0.0.1', port: 3001, path: '/api/health', method },
+            (res) => resolve(res.statusCode || 0)
+          );
+          req.on('error', () => resolve(0));
+          req.end();
+        });
+      });
+    })
+  );
+  const allDisallowedBlocked = methodStatuses.every((s) => s === 405 || s === 400);
+
+  const overrideRes = await fetchApi('/api/health', {
+    method: 'GET',
+    headers: {
+      'X-HTTP-Method-Override': 'DELETE',
+      'X-Method-Override': 'POST',
+    },
   });
-  recordTest('API Abuse', 'B-04', 'HTTP Method Tampering (TRACE bloccato con 405 Method Not Allowed)', traceStatus === 405, `Status: ${traceStatus}`);
+  const overrideIgnored = overrideRes.status === 200 && overrideRes.body?.status === 'ok';
+
+  const verbInversionRes = await fetchApi('/api/auth/logout-all', { method: 'GET' });
+  const verbInversionBlocked = verbInversionRes.status === 404 || verbInversionRes.status === 405;
+
+  recordTest(
+    'API Abuse',
+    'B-04',
+    'HTTP Method Tampering bloccato (verbi arbitrari: 405, method override neutralizzati)',
+    allDisallowedBlocked && overrideIgnored && verbInversionBlocked,
+    `Disallowed: ${methodStatuses.join('/')}, Override Safe: ${overrideIgnored}, Inversion Safe: ${verbInversionBlocked}`
+  );
 
   // 8.5 OPTIONS non espone informazioni inutili
   const optionsRes = await fetchApi('/api/health', { method: 'OPTIONS' });
@@ -752,11 +842,38 @@ async function run100Tests() {
   const roleUnchanged = massUser?.role !== 'admin';
   recordTest('API Abuse', 'B-06', 'Mass assignment protetto (campi role, is_banned ignorati in update)', roleUnchanged, `Role: ${massUser?.role}`);
 
-  // 8.7 Parameter pollution gestita
-  const hppRes = await fetchApi('/api/licenses?app_id=123&app_id=456', {
+  // 8.7 Parameter pollution gestita (HPP normalization & isolation)
+  const appA2Res = await fetchApi('/api/applications', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
+    body: JSON.stringify({ name: `AppA2_${testStamp}` }),
+  });
+  const appA2_Id = appA2Res.body?.id;
+  await fetchApi('/api/licenses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
+    body: JSON.stringify({ app_id: appA2_Id, license_type: 'monthly', note: 'AppA2 Lic' }),
+  });
+
+  const hppPollutedRes = await fetchApi(`/api/licenses?app_id=${appA_Id}&app_id=${appA2_Id}`, {
     headers: { Authorization: `Bearer ${tokenA}` },
   });
-  recordTest('API Abuse', 'B-07', 'HTTP Parameter Pollution gestito senza crash del server (200 OK)', hppRes.status === 200, `Status: ${hppRes.status}`);
+  const hppOk = hppPollutedRes.status === 200;
+  const returnedLicenses = Array.isArray(hppPollutedRes.body) ? hppPollutedRes.body : [];
+  const noAppA2Leak = returnedLicenses.length > 0 && returnedLicenses.every((l: any) => l.app_id === appA_Id);
+
+  const hppLimitRes = await fetchApi('/api/licenses?limit=1&limit=100', {
+    headers: { Authorization: `Bearer ${tokenA}` },
+  });
+  const limitRespected = Array.isArray(hppLimitRes.body) && hppLimitRes.body.length <= 1;
+
+  recordTest(
+    'API Abuse',
+    'B-07',
+    'HTTP Parameter Pollution normalizzato a scalare (nessun leak cross-app o bypass limit)',
+    hppOk && noAppA2Leak && limitRespected,
+    `Status: ${hppPollutedRes.status}, Isolated: ${noAppA2Leak}, Limit Safe: ${limitRespected}`
+  );
 
   // 8.8 Payload JSON enorme rifiutato (limite express 2MB: 413)
   const hugePayload = JSON.stringify({ huge: 'A'.repeat(2.5 * 1024 * 1024) });

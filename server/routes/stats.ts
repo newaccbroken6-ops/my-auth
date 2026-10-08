@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { query } from '../db.js';
-import { authenticateToken } from '../auth.js';
+import { authenticateToken, requireAdmin } from '../auth.js';
 import type { AuthRequest } from '../auth.js';
 
 const router = Router();
@@ -183,8 +183,8 @@ router.get('/monitor', authenticateToken, async (req: AuthRequest, res: Response
   }
 });
 
-// GET /api/stats/system
-router.get('/system', authenticateToken, async (_req: AuthRequest, res: Response) => {
+// GET /api/stats/system (Admin only)
+router.get('/system', authenticateToken, requireAdmin, async (_req: AuthRequest, res: Response) => {
   try {
     const startQuery = Date.now();
     

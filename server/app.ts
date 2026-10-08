@@ -41,6 +41,19 @@ app.use(auditLoggerMiddleware);
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
+// 4b. HTTP Parameter Pollution (HPP) Defense
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.query && typeof req.query === 'object') {
+    for (const key of Object.keys(req.query)) {
+      if (Array.isArray(req.query[key])) {
+        // Enforce scalar value by taking the first parameter occurrence
+        req.query[key] = (req.query[key] as any[])[0];
+      }
+    }
+  }
+  next();
+});
+
 // 5. Web Application Firewall (WAF) & Anomaly Filter (Section 8)
 app.use(wafMiddleware);
 
