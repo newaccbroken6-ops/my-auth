@@ -37,6 +37,9 @@ router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const user = req.user!;
     const { app_id, status, search, limit = '200' } = req.query;
+    const cleanAppId = Array.isArray(app_id) ? String(app_id[0]) : (app_id ? String(app_id) : undefined);
+    const cleanStatus = Array.isArray(status) ? String(status[0]) : (status ? String(status) : undefined);
+    const cleanSearch = Array.isArray(search) ? String(search[0]) : (search ? String(search) : undefined);
 
     const conditions: string[] = [];
     const params: any[] = [];
@@ -48,19 +51,24 @@ router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
       idx++;
     }
 
-    if (app_id) {
-      conditions.push(`l.app_id = $${idx++}`);
-      params.push(app_id);
+    const isUuid = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+    if (cleanAppId) {
+      if (isUuid(cleanAppId)) {
+        conditions.push(`l.app_id = $${idx++}`);
+        params.push(cleanAppId);
+      } else {
+        return res.json([]);
+      }
     }
 
-    if (status && status !== 'all') {
+    if (cleanStatus && cleanStatus !== 'all') {
       conditions.push(`l.status = $${idx++}`);
-      params.push(status);
+      params.push(cleanStatus);
     }
 
-    if (search) {
+    if (cleanSearch) {
       conditions.push(`(l.license_key ILIKE $${idx} OR l.note ILIKE $${idx})`);
-      params.push(`%${search}%`);
+      params.push(`%${cleanSearch}%`);
       idx++;
     }
 
@@ -212,6 +220,10 @@ router.post('/', authenticateToken, async (req: AuthRequest, res: Response) => {
 router.put('/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    const isUuid = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+    if (!isUuid(id)) {
+      return res.status(404).json({ error: 'License not found' });
+    }
     const { status, note, expires_at, hwid_enabled } = req.body;
     const user = req.user!;
 
@@ -282,6 +294,10 @@ router.put('/:id', authenticateToken, async (req: AuthRequest, res: Response) =>
 router.delete('/:id', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    const isUuid = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+    if (!isUuid(id)) {
+      return res.status(404).json({ error: 'License not found' });
+    }
     const user = req.user!;
 
     const checkRes = await query(

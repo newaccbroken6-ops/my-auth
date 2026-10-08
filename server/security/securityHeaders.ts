@@ -19,10 +19,12 @@ export function securityHeadersMiddleware(req: Request, res: Response, next: Nex
   );
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
 
   // 3. Strict Transport Security (HSTS)
-  // Always sent in production; preload enabled per Section 7.1 & 12.7
-  if (process.env.NODE_ENV === 'production') {
+  // Sent on HTTPS connections and in production; preload enabled per Section 7.1 & 12.7
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.NODE_ENV === 'production';
+  if (isHttps) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
   }
 

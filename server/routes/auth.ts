@@ -17,14 +17,32 @@ const router = Router();
 
 const storage = multer.memoryStorage();
 
+const ALLOWED_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+
+function isValidImageMagicBytes(buf: Buffer): boolean {
+  if (!buf || buf.length < 8) return false;
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return true;
+  // PNG: 89 50 4E 47
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return true;
+  // GIF: 47 49 46 38
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38) return true;
+  // WEBP: RIFF....WEBP (52 49 46 46 .... 57 45 42 50)
+  if (
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
+  ) return true;
+  return false;
+}
+
 const upload = multer({
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (_req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
+    if (ALLOWED_IMAGE_MIMES.has(file.mimetype.toLowerCase())) {
       cb(null, true);
     } else {
-      cb(new Error('Only images are allowed'));
+      cb(new Error('Only JPEG, PNG, WEBP, and GIF images are allowed'));
     }
   },
 });
@@ -196,6 +214,10 @@ router.post('/avatar', authenticateToken, upload.single('avatar'), async (req: A
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No image file uploaded' });
+    }
+
+    if (!isValidImageMagicBytes(req.file.buffer)) {
+      return res.status(400).json({ error: 'Invalid image format: File header does not match valid image signature' });
     }
 
     const base64Image = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;

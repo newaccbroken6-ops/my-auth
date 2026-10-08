@@ -37,14 +37,19 @@ app.use(securityHeadersMiddleware);
 // 3. Structured Logging & Correlation Tracing (Section 14)
 app.use(auditLoggerMiddleware);
 
-// 4. Web Application Firewall (WAF) & Anomaly Filter (Section 8)
+// 4. Request Body Parsers (Strict limits per Section 4.2: 2MB for standard JSON)
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+
+// 5. Web Application Firewall (WAF) & Anomaly Filter (Section 8)
 app.use(wafMiddleware);
 
-// 5. CORS Hardening
+// 6. CORS Hardening
 const allowedOrigins = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim().toLowerCase())
   : [
     'https://my-auth-kohl.vercel.app',
+    'https://supernova-keys.vercel.app',
     'http://localhost:5173',
     'http://localhost:3000',
     'http://localhost:3001',
@@ -56,14 +61,11 @@ app.use(
       // Allow non-browser requests (e.g. mobile apps, C++ clients, curl) with no origin
       if (!requestOrigin) return callback(null, true);
       const cleanOrigin = requestOrigin.toLowerCase();
-      const isAllowed = allowedOrigins.some(
-        (allowed) => cleanOrigin === allowed || cleanOrigin.endsWith('.vercel.app')
-      );
+      const isAllowed = allowedOrigins.includes(cleanOrigin);
       if (isAllowed) {
-        callback(null, true);
-      } else {
-        callback(new Error('CORS Policy: Origin not allowed'));
+        return callback(null, true);
       }
+      return callback(new Error('CORS: Not allowed by policy'));
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Client-Info', 'Apikey', 'X-Request-ID'],
@@ -71,10 +73,6 @@ app.use(
     maxAge: 86400,
   })
 );
-
-// 6. Request Body Parsers (Strict limits per Section 4.2: 2MB for standard JSON)
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // 7. CSRF Protection for state-changing browser requests (Section 12.3)
 app.use(csrfProtectionMiddleware);
@@ -142,7 +140,12 @@ app.use('/', apiRouter);
 
 // Global Error Handler (RFC 9457 Problem Details style, no stack leakage in prod)
 app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
-  const status = typeof err.status === 'number' ? err.status : 500;
+  let status = typeof err.status === 'number' ? err.status : 500;
+  if (err.message && err.message.toLowerCase().includes('cors')) {
+    status = 403;
+  } else if (err.name === 'MulterError' || (err.message && err.message.toLowerCase().includes('allowed'))) {
+    status = 400;
+  }
   const requestId = (req as any).requestId || 'unknown';
 
   if (status >= 500) {

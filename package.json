@@ -9,6 +9,8 @@
     "server": "node --loader ./server/loader.mjs --experimental-strip-types server/index.ts",
     "db:migrate": "node --loader ./server/loader.mjs --experimental-strip-types server/migrate.ts",
     "security:test": "node --loader ./server/loader.mjs --experimental-strip-types scripts/security-audit.ts",
+    "pentest:test": "node --loader ./server/loader.mjs --experimental-strip-types scripts/pentest-suite.ts",
+    "audit:100": "node --loader ./server/loader.mjs --experimental-strip-types scripts/full-100-audit.ts",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",

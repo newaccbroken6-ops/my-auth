@@ -150,12 +150,13 @@ export function csrfProtectionMiddleware(req: Request, res: Response, next: Next
     'http://localhost:3000',
     'http://localhost:3001',
     'https://supernova-keys.vercel.app',
+    'https://my-auth-kohl.vercel.app',
     ...configuredOrigins,
   ].map((o) => o.trim().toLowerCase());
 
   if (origin) {
     const cleanOrigin = origin.trim().toLowerCase();
-    const isAllowed = allowedOrigins.some((allowed) => cleanOrigin === allowed || cleanOrigin.endsWith('.vercel.app'));
+    const isAllowed = allowedOrigins.includes(cleanOrigin);
     if (!isAllowed) {
       console.warn(`[CSRF BLOCKED] Origin ${origin} not in allowlist on ${req.method} ${req.path}`);
       return res.status(403).json({ error: 'CSRF Validation Failed: Origin not permitted' });

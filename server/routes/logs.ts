@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Response } from 'express';
 import { query } from '../db.js';
-import { authenticateToken } from '../auth.js';
+import { authenticateToken, requireAdmin } from '../auth.js';
 import type { AuthRequest } from '../auth.js';
 
 const router = Router();
@@ -57,20 +57,10 @@ router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// DELETE /api/logs/clear
-router.delete('/clear', authenticateToken, async (req: AuthRequest, res: Response) => {
+// DELETE /api/logs/clear (Admin only)
+router.delete('/clear', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
   try {
-    const user = req.user!;
-    if (user.role === 'admin') {
-      await query('DELETE FROM activity_logs');
-    } else {
-      await query(
-        `DELETE FROM activity_logs 
-         WHERE user_id = $1 
-            OR app_id IN (SELECT id FROM applications WHERE owner_id = $1)`,
-        [user.id]
-      );
-    }
+    await query('DELETE FROM activity_logs');
     return res.json({ success: true, message: 'Logs cleared successfully' });
   } catch (err: any) {
     console.error('Clear logs error:', err);

@@ -80,20 +80,42 @@ const HONEYPOT_PATHS = [
 const SQLI_PATTERNS = [
   /(\b(union(\s+all)?)\s+select\b)/i,
   /(\bselect\b.+\bfrom\b.+\binformation_schema\b)/i,
-  /(\b(sleep|benchmark)\s*\(\s*\d+\s*\))/i,
+  /(\b(sleep|benchmark|pg_sleep)\s*\(\s*\d+\s*\))/i,
   /(\bor\b\s+['"\d\w]+\s*=\s*['"\d\w]+(\s*--|\s*#|\s*\/\*))/i,
   /(\bexec(ute)?\s*\(.+\))/i,
   /(;\s*drop\s+table\b)/i,
   /(;\s*delete\s+from\b)/i,
   /(;\s*insert\s+into\b)/i,
   /(;\s*update\s+.+\bset\b)/i,
-  /(['"]\s*or\s*1\s*=\s*1)/i,
+  /(['"]\s*or\s*['"]?1['"]?\s*=\s*['"]?1['"]?)/i,
+  /(['"]\s*or\s*['"][^'"]+['"]\s*=\s*['"][^'"]+['"])/i,
   /(\/\*!\d+.*\bselect\b)/i,
+  /(["']\s*;\s*--)/,
+];
+
+// NoSQL Injection patterns
+const NOSQLI_PATTERNS = [
+  /\$(where|regex|gt|gte|lt|lte|ne|in|nin)\b/i,
+];
+
+// LDAP Injection patterns
+const LDAP_PATTERNS = [
+  /(\(\s*&|\(\s*\||\(\s*!\s*\(|\*\s*\)\s*\()/i,
+];
+
+// Template Injection (SSTI) patterns
+const SSTI_PATTERNS = [
+  /(\{\{\s*.*\s*\}\}|\$\{[^}]+\}|<%.*%>)/,
+];
+
+// CRLF / Header Injection patterns
+const CRLF_PATTERNS = [
+  /(\r\n|\r|\n)(content-type|set-cookie|location|access-control):/i,
 ];
 
 // Cross-Site Scripting (XSS) patterns
 const XSS_PATTERNS = [
-  /<script\b[^>]*>([\s\S]*?)<\/script>/i,
+  /<script\b[^>]*>/i,
   /javascript\s*:/i,
   /vbscript\s*:/i,
   /data\s*:\s*text\/html/i,
@@ -145,13 +167,37 @@ function inspectValue(val: any, patterns: RegExp[]): { matched: boolean; pattern
 
   if (typeof val === 'string') {
     // Null byte check
-    if (val.includes('\0') || val.includes('%00')) {
+    if (val.includes('\0') || val.includes('%00') || val.toLowerCase().includes('%2500')) {
       return { matched: true, pattern: 'NullByte', sample: '\\0' };
     }
 
-    for (const pat of patterns) {
-      if (pat.test(val)) {
-        return { matched: true, pattern: pat.toString(), sample: val.slice(0, 100) };
+    // Decoding & Unicode normalization for obfuscation/encoding bypass defense (Section 8)
+    let decoded = val;
+    try {
+      decoded = decodeURIComponent(val);
+      if (decoded !== val) {
+        try {
+          decoded = decodeURIComponent(decoded);
+        } catch {
+          // ignore malformed double-decoding
+        }
+      }
+    } catch {
+      // ignore malformed URI components
+    }
+
+    let normalized = val;
+    try {
+      normalized = val.normalize('NFKC');
+    } catch {}
+
+    const candidates = [val, decoded, normalized];
+
+    for (const text of candidates) {
+      for (const pat of patterns) {
+        if (pat.test(text)) {
+          return { matched: true, pattern: pat.toString(), sample: text.slice(0, 100) };
+        }
       }
     }
     return { matched: false };
@@ -213,6 +259,10 @@ export async function wafMiddleware(req: Request, res: Response, next: NextFunct
   // 5. Inspect Query, Body, and Headers for Attack Vectors
   const allPatterns = [
     ...SQLI_PATTERNS,
+    ...NOSQLI_PATTERNS,
+    ...LDAP_PATTERNS,
+    ...SSTI_PATTERNS,
+    ...CRLF_PATTERNS,
     ...XSS_PATTERNS,
     ...PATH_TRAVERSAL_PATTERNS,
     ...RCE_PATTERNS,
