@@ -240,7 +240,7 @@ export default function MonitorPage() {
                     </span>
                     {event.ip_address && event.ip_address !== '—' && (
                       <button
-                        onClick={() => handleKickIp(event.ip_address)}
+                        onClick={() => handleKickIp(event.ip_address!)}
                         disabled={kickingIp === event.ip_address}
                         className="px-2.5 py-1 rounded-lg bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 text-xs font-semibold flex items-center gap-1 transition-all"
                         title={`Kick & Ban IP ${event.ip_address}`}

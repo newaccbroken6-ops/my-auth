@@ -155,7 +155,7 @@ export default function LogsPage() {
                             onClick={async () => {
                               if (confirm(`Vuoi BANNARE l'IP ${log.ip_address}?`)) {
                                 try {
-                                  await api.banIp(log.ip_address, `Banned from logs: ${log.event_type}`);
+                                  await api.banIp(log.ip_address!, `Banned from logs: ${log.event_type}`);
                                   alert(`IP ${log.ip_address} BANNATO con successo!`);
                                   load();
                                 } catch (e: any) {

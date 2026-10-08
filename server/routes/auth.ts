@@ -270,6 +270,17 @@ router.post('/change-password', authenticateToken, authRateLimiter, async (req: 
   }
 });
 
+// POST /api/auth/logout (Revoke user session - Section 12.2)
+router.post('/logout', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    await revokeAllUserSessions(req.user!.id);
+    return res.json({ success: true, message: 'Logged out successfully. Session revoked.' });
+  } catch (err: any) {
+    console.error('Logout error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/auth/logout-all (Revoke all active sessions - Section 12.2)
 router.post('/logout-all', authenticateToken, async (req: AuthRequest, res: Response) => {
   try {

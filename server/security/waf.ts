@@ -148,12 +148,23 @@ const RCE_PATTERNS = [
   /(\$\((id|whoami|cat|bash|uname)\))/i,
 ];
 
-// SSRF Metadata destinations
+// SSRF destinations (Cloud metadata, Private IP ranges, decimal/octal/hex notations)
 const SSRF_PATTERNS = [
   /169\.254\.169\.254/,
   /fd00:ec2::254/i,
   /metadata\.google\.internal/i,
   /100\.100\.100\.200/,
+  /https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)/i,
+  /https?:\/\/(0177[0-9.]*|0x7f[0-9a-f.]*|0x[0-9a-f]{8}|2130706433|\[::ffff:127\.)/i,
+  /https?:\/\/.*(local|internal|lan|corp|internal\.cloud)\b/i,
+];
+
+// Prototype pollution patterns
+const PROTO_POLLUTION_PATTERNS = [
+  /__proto__/i,
+  /constructor\s*\.\s*prototype/i,
+  /"__proto__"/i,
+  /"prototype"/i,
 ];
 
 // Allowed HTTP methods (Section 8.3)
@@ -162,8 +173,8 @@ const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'
 /**
  * Recursively inspects values in objects and strings for attack signatures
  */
-function inspectValue(val: any, patterns: RegExp[]): { matched: boolean; pattern?: string; sample?: string } {
-  if (val === null || val === undefined) return { matched: false };
+function inspectValue(val: any, patterns: RegExp[], depth: number = 0): { matched: boolean; pattern?: string; sample?: string } {
+  if (val === null || val === undefined || depth > 8) return { matched: false };
 
   if (typeof val === 'string') {
     // Null byte check
@@ -191,7 +202,11 @@ function inspectValue(val: any, patterns: RegExp[]): { matched: boolean; pattern
       normalized = val.normalize('NFKC');
     } catch {}
 
-    const candidates = [val, decoded, normalized];
+    // Deflate inline SQL / C-style comments to neutralize comment-splitting evasion
+    const commentStripped = val.replace(/\/\*[\s\S]*?\*\//g, ' ');
+    const decodedCommentStripped = decoded.replace(/\/\*[\s\S]*?\*\//g, ' ');
+
+    const candidates = [val, decoded, normalized, commentStripped, decodedCommentStripped];
 
     for (const text of candidates) {
       for (const pat of patterns) {
@@ -204,13 +219,23 @@ function inspectValue(val: any, patterns: RegExp[]): { matched: boolean; pattern
   }
 
   if (typeof val === 'object') {
-    for (const key of Object.keys(val)) {
+    const keys = Array.from(new Set([...Object.keys(val), ...Object.getOwnPropertyNames(val)]));
+    for (const key of keys) {
+      // Direct prototype pollution property check
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        return { matched: true, pattern: 'ProtoPollutionKey', sample: key };
+      }
+
       // Also inspect keys
-      const keyCheck = inspectValue(key, patterns);
+      const keyCheck = inspectValue(key, patterns, depth + 1);
       if (keyCheck.matched) return keyCheck;
 
-      const valCheck = inspectValue(val[key], patterns);
-      if (valCheck.matched) return valCheck;
+      try {
+        const valCheck = inspectValue(val[key], patterns, depth + 1);
+        if (valCheck.matched) return valCheck;
+      } catch {
+        // Guard against accessor recursion or getters
+      }
     }
   }
 
@@ -267,6 +292,7 @@ export async function wafMiddleware(req: Request, res: Response, next: NextFunct
     ...PATH_TRAVERSAL_PATTERNS,
     ...RCE_PATTERNS,
     ...SSRF_PATTERNS,
+    ...PROTO_POLLUTION_PATTERNS,
   ];
 
   // Inspect Query Parameters

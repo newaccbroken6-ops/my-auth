@@ -289,7 +289,7 @@ class ApiClient {
     return this.request(`/api/licenses${queryStr ? `?${queryStr}` : ''}`);
   }
 
-  async createLicense(data: { app_id: string; license_type?: string; note?: string; custom_name?: string }): Promise<License> {
+  async createLicense(data: { app_id: string; license_type?: string; note?: string; custom_name?: string; hwid_enabled?: boolean }): Promise<License> {
     return this.request('/api/licenses', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -302,6 +302,7 @@ class ApiClient {
     count?: number;
     note?: string;
     custom_name?: string;
+    hwid_enabled?: boolean;
   }): Promise<{ success: boolean; licenses: License[]; count: number }> {
     return this.request('/api/licenses/bulk', {
       method: 'POST',
