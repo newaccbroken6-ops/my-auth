@@ -1,8 +1,14 @@
-import { Router, Response } from 'express';
+import { Router } from 'express';
+import type { Response } from 'express';
 import { query } from '../db.js';
-import { authenticateToken, requireAdmin, AuthRequest } from '../auth.js';
+import { authenticateToken, requireAdmin } from '../auth.js';
+import type { AuthRequest } from '../auth.js';
+import { revokeAllUserSessions } from '../security/authHardening.js';
+import { adminRateLimiter } from '../security/rateLimiter.js';
 
 const router = Router();
+
+router.use(authenticateToken, requireAdmin, adminRateLimiter);
 
 // GET /api/users (Admin only)
 router.get('/', authenticateToken, requireAdmin, async (_req: AuthRequest, res: Response) => {
@@ -41,6 +47,9 @@ router.put('/:id/role', authenticateToken, requireAdmin, async (req: AuthRequest
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Invalidate any active sessions for the user whose role changed
+    await revokeAllUserSessions(id);
+
     return res.json(result.rows[0]);
   } catch (err: any) {
     console.error('Update user role error:', err);
@@ -65,6 +74,11 @@ router.post('/:id/ban', authenticateToken, requireAdmin, async (req: AuthRequest
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Invalidate all active sessions for banned user
+    if (banned) {
+      await revokeAllUserSessions(id);
     }
 
     await query(
@@ -101,6 +115,10 @@ router.post('/ban-user', authenticateToken, requireAdmin, async (req: AuthReques
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
+    }
+
+    if (isBanned) {
+      await revokeAllUserSessions(user_id);
     }
 
     await query(

@@ -96,6 +96,14 @@ export async function runMigrations() {
     await client.query(schemaSql);
     console.log('Tables and indexes created successfully!');
 
+    // Read and execute security hardening migration
+    const secHardeningPath = path.join(__dirname, 'migrations', 'security_hardening.sql');
+    if (fs.existsSync(secHardeningPath)) {
+      const secSql = fs.readFileSync(secHardeningPath, 'utf-8');
+      await client.query(secSql);
+      console.log('Security hardening schema applied successfully!');
+    }
+
     // Create default administrator if none exists
     const adminRes = await client.query(`SELECT id, email FROM profiles WHERE role = 'admin' LIMIT 1;`);
     if (adminRes.rows.length === 0) {

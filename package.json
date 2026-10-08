@@ -6,15 +6,17 @@
   "scripts": {
     "dev": "concurrently -n \"API,WEB\" -c \"cyan,magenta\" \"npm run server\" \"npm run client\"",
     "client": "vite",
-    "server": "tsx server/index.ts",
-    "db:migrate": "tsx server/migrate.ts",
+    "server": "node --loader ./server/loader.mjs --experimental-strip-types server/index.ts",
+    "db:migrate": "node --loader ./server/loader.mjs --experimental-strip-types server/migrate.ts",
+    "security:test": "node --loader ./server/loader.mjs --experimental-strip-types scripts/security-audit.ts",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
-    "start": "tsx server/index.ts"
+    "start": "node --loader ./server/loader.mjs --experimental-strip-types server/index.ts"
   },
   "dependencies": {
+    "@esbuild/win32-x64": "^0.21.5",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",

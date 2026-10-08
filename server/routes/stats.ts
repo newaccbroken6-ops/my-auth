@@ -1,6 +1,8 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
 import { query } from '../db.js';
-import { authenticateToken, AuthRequest } from '../auth.js';
+import { authenticateToken } from '../auth.js';
+import type { AuthRequest } from '../auth.js';
 
 const router = Router();
 const serverStartTime = Date.now();
@@ -10,10 +12,14 @@ router.get('/dashboard', authenticateToken, async (req: AuthRequest, res: Respon
   try {
     const user = req.user!;
     const isAdmin = user.role === 'admin';
+    const userId = user.id;
 
-    const filterClause = isAdmin ? '' : `WHERE owner_id = '${user.id}'`;
-    const appFilterClause = isAdmin ? '' : `WHERE owner_id = '${user.id}'`;
-    const logFilterClause = isAdmin ? '' : `WHERE user_id = '${user.id}' OR app_id IN (SELECT id FROM applications WHERE owner_id = '${user.id}')`;
+    // Use parameterized queries instead of string concatenation
+    const filterClause = isAdmin ? '' : 'WHERE owner_id = $1';
+    const appFilterClause = isAdmin ? '' : 'WHERE owner_id = $1';
+    const logFilterClause = isAdmin ? '' : 'WHERE user_id = $1 OR app_id IN (SELECT id FROM applications WHERE owner_id = $1)';
+
+    const filterParams = isAdmin ? [] : [userId];
 
     const [
       totalLicRes,
@@ -25,20 +31,20 @@ router.get('/dashboard', authenticateToken, async (req: AuthRequest, res: Respon
       totalLogsRes,
       recentLogsRes,
     ] = await Promise.all([
-      query(`SELECT count(*)::int as count FROM licenses ${filterClause}`),
-      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'active'`),
-      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'expired'`),
-      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'banned'`),
-      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'suspended'`),
-      query(`SELECT count(*)::int as count FROM applications ${appFilterClause}`),
-      query(`SELECT count(*)::int as count FROM activity_logs ${logFilterClause}`),
+      query(`SELECT count(*)::int as count FROM licenses ${filterClause}`, filterParams),
+      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'active'`, filterParams),
+      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'expired'`, filterParams),
+      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'banned'`, filterParams),
+      query(`SELECT count(*)::int as count FROM licenses ${filterClause ? `${filterClause} AND` : 'WHERE'} status = 'suspended'`, filterParams),
+      query(`SELECT count(*)::int as count FROM applications ${appFilterClause}`, filterParams),
+      query(`SELECT count(*)::int as count FROM activity_logs ${logFilterClause}`, filterParams),
       query(`
         SELECT created_at 
         FROM activity_logs 
         ${logFilterClause}
         ORDER BY created_at DESC 
         LIMIT 200
-      `),
+      `, filterParams),
     ]);
 
     const totalLicenses = totalLicRes.rows[0]?.count ?? 0;

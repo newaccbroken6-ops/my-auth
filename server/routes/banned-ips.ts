@@ -1,8 +1,14 @@
-import { Router, Response } from 'express';
+import { Router } from 'express';
+import type { Response } from 'express';
 import { query } from '../db.js';
-import { authenticateToken, AuthRequest } from '../auth.js';
+import { authenticateToken } from '../auth.js';
+import type { AuthRequest } from '../auth.js';
+import { syncBannedIpsCache } from '../security/waf.js';
+import { adminRateLimiter } from '../security/rateLimiter.js';
 
 const router = Router();
+
+router.use(authenticateToken, adminRateLimiter);
 
 // GET /api/banned-ips
 router.get('/', authenticateToken, async (req: AuthRequest, res: Response) => {
@@ -58,6 +64,9 @@ router.post('/', authenticateToken, async (req: AuthRequest, res: Response) => {
       [user.id, cleanIp, JSON.stringify({ reason: cleanReason, banned_by: user.id })]
     );
 
+    // Sync in-memory perimeter cache
+    await syncBannedIpsCache();
+
     return res.status(201).json({
       success: true,
       message: `IP ${cleanIp} has been kicked and banned successfully.`,
@@ -91,6 +100,8 @@ router.delete('/:id', authenticateToken, async (req: AuthRequest, res: Response)
       [user.id, unbanned.ip_address, JSON.stringify({ unbanned_by: user.id })]
     );
 
+    await syncBannedIpsCache();
+
     return res.json({ success: true, message: `IP ${unbanned.ip_address} has been unbanned.` });
   } catch (err: any) {
     console.error('Unban IP error:', err);
@@ -112,6 +123,8 @@ router.delete('/ip/:ip', authenticateToken, async (req: AuthRequest, res: Respon
     if (delRes.rows.length === 0) {
       return res.status(404).json({ error: 'Banned IP record not found' });
     }
+
+    await syncBannedIpsCache();
 
     return res.json({ success: true, message: `IP ${ip} has been unbanned.` });
   } catch (err: any) {

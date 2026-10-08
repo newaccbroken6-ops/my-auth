@@ -1,7 +1,9 @@
-import { Router, Response } from 'express';
+import { Router } from 'express';
+import type { Response } from 'express';
 import crypto from 'crypto';
 import { query } from '../db.js';
-import { authenticateToken, AuthRequest } from '../auth.js';
+import { authenticateToken } from '../auth.js';
+import type { AuthRequest } from '../auth.js';
 
 const router = Router();
 

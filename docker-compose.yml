@@ -1,0 +1,81 @@
+# ==============================================================================
+# Segmented Multi-Tier Docker Compose Architecture
+# Reference: Section 2 & Section 15.3 of architettura_sicurezza_web.txt
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  # PROXY TIER (DMZ) - Section 4
+  proxy:
+    image: nginx:1.27-alpine
+    container_name: supernova_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - nginx_logs:/var/log/nginx
+    networks:
+      - dmz_net
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+    depends_on:
+      - app
+
+  # APPLICATION TIER (Private Subnet - No direct Internet ingress) - Section 2.1
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: supernova_app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=${CORS_ORIGIN}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - ORIGIN_VERIFY_SECRET=${ORIGIN_VERIFY_SECRET}
+    networks:
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1024M
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64M
+
+networks:
+  # DMZ Network: Exposed only for Edge Proxy
+  dmz_net:
+    driver: bridge
+  # App Network: Isolated internal bridge, no direct external ports
+  app_net:
+    driver: bridge
+    internal: true
+
+volumes:
+  nginx_logs:

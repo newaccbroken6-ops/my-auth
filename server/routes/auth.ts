@@ -1,8 +1,17 @@
-import { Router, Response } from 'express';
+import { Router } from 'express';
+import type { Response } from 'express';
 import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { query } from '../db.js';
-import { authenticateToken, generateToken, AuthRequest } from '../auth.js';
+import { authenticateToken, generateToken } from '../auth.js';
+import type { AuthRequest } from '../auth.js';
+import {
+  isAccountLocked,
+  recordFailedLogin,
+  recordSuccessfulLogin,
+  revokeAllUserSessions,
+} from '../security/authHardening.js';
+import { authRateLimiter } from '../security/rateLimiter.js';
 
 const router = Router();
 
@@ -21,7 +30,7 @@ const upload = multer({
 });
 
 // POST /api/auth/register
-router.post('/register', async (req, res: Response) => {
+router.post('/register', authRateLimiter, async (req, res: Response) => {
   try {
     const { email, password, username } = req.body;
 
@@ -29,8 +38,12 @@ router.post('/register', async (req, res: Response) => {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    if (password.length < 4) {
-      return res.status(400).json({ error: 'Password must be at least 4 characters long' });
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+    }
+
+    if (!/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+      return res.status(400).json({ error: 'Password must contain at least one uppercase letter and one number' });
     }
 
     const cleanEmail = email.trim().toLowerCase();
@@ -49,9 +62,9 @@ router.post('/register', async (req, res: Response) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const insertRes = await query(
-      `INSERT INTO profiles (email, password_hash, username, role)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, email, username, role, is_banned, ban_reason, avatar_url, created_at`,
+      `INSERT INTO profiles (email, password_hash, username, role, token_version)
+       VALUES ($1, $2, $3, $4, 1)
+       RETURNING id, email, username, role, is_banned, ban_reason, avatar_url, token_version, created_at`,
       [cleanEmail, hashedPassword, cleanUsername, role]
     );
 
@@ -73,22 +86,35 @@ router.post('/register', async (req, res: Response) => {
 });
 
 // POST /api/auth/login
-router.post('/login', async (req, res: Response) => {
+router.post('/login', authRateLimiter, async (req, res: Response) => {
   try {
     const { email, password } = req.body;
+    const clientIp = (req as any).clientIp || req.socket.remoteAddress || '127.0.0.1';
 
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
     const cleanEmail = email.trim().toLowerCase();
+
+    // 1. Check account lockout (Brute-force / Credential Stuffing defense - Section 10 & 12)
+    const lockStatus = await isAccountLocked(cleanEmail);
+    if (lockStatus.locked) {
+      return res.status(429).json({
+        error: `Account is temporarily locked due to multiple failed login attempts. Please try again in ${lockStatus.remainingMinutes} minutes.`,
+      });
+    }
+
     const result = await query(
-      `SELECT id, email, password_hash, username, role, is_banned, ban_reason, avatar_url, created_at 
+      `SELECT id, email, password_hash, username, role, is_banned, ban_reason, avatar_url, token_version, created_at 
        FROM profiles WHERE email = $1`,
       [cleanEmail]
     );
 
+    // Uniform comparison to prevent timing-based user enumeration (Section 12.4)
     if (result.rows.length === 0) {
+      // Dummy compare to avoid timing discrepancies
+      await bcrypt.compare(password, '$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO1234567890');
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
@@ -102,8 +128,17 @@ router.post('/login', async (req, res: Response) => {
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
+      const wasLocked = await recordFailedLogin(cleanEmail, clientIp);
+      if (wasLocked) {
+        return res.status(429).json({
+          error: 'Account locked due to too many failed attempts. Try again in 15 minutes.',
+        });
+      }
       return res.status(401).json({ error: 'Invalid email or password' });
     }
+
+    // Success: reset failures and record login telemetry
+    await recordSuccessfulLogin(user.id, clientIp);
 
     const { password_hash, ...safeUser } = user;
     const token = generateToken(safeUser);
@@ -183,11 +218,15 @@ router.post('/avatar', authenticateToken, upload.single('avatar'), async (req: A
 });
 
 // POST /api/auth/change-password
-router.post('/change-password', authenticateToken, async (req: AuthRequest, res: Response) => {
+router.post('/change-password', authenticateToken, authRateLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword) {
       return res.status(400).json({ error: 'Current and new password are required' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long' });
     }
 
     const userRes = await query('SELECT password_hash FROM profiles WHERE id = $1', [req.user!.id]);
@@ -199,10 +238,24 @@ router.post('/change-password', authenticateToken, async (req: AuthRequest, res:
     const newHash = await bcrypt.hash(newPassword, 10);
     await query('UPDATE profiles SET password_hash = $1, updated_at = now() WHERE id = $2', [newHash, req.user!.id]);
 
-    return res.json({ success: true, message: 'Password updated successfully' });
+    // Invalidate all existing sessions/tokens across all devices (Section 12.2)
+    await revokeAllUserSessions(req.user!.id);
+
+    return res.json({ success: true, message: 'Password updated successfully. Other sessions revoked.' });
   } catch (err: any) {
     console.error('Change password error:', err);
     return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+// POST /api/auth/logout-all (Revoke all active sessions - Section 12.2)
+router.post('/logout-all', authenticateToken, async (req: AuthRequest, res: Response) => {
+  try {
+    await revokeAllUserSessions(req.user!.id);
+    return res.json({ success: true, message: 'All active sessions have been revoked successfully.' });
+  } catch (err: any) {
+    console.error('Logout all error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 

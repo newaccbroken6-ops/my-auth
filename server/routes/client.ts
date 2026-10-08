@@ -1,5 +1,8 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
+import type { Request, Response } from 'express';
 import { query } from '../db.js';
+import { resolveClientIp } from '../security/originProtection.js';
+import { clientValidationLimiter } from '../security/rateLimiter.js';
 
 const router = Router();
 
@@ -10,7 +13,7 @@ const RATE_LIMIT_MAX_REQUESTS = 10;
 export async function handleValidateLicense(req: Request, res: Response) {
   try {
     const { license_key, hwid, app_id } = req.body;
-    const ip = ((req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1').split(',')[0].trim();
+    const ip = (req as any).clientIp || resolveClientIp(req);
 
     // Check if IP is in banned_ips table
     const banCheckRes = await query('SELECT id, reason FROM banned_ips WHERE ip_address = $1', [ip]);
@@ -178,7 +181,7 @@ export async function handleLatestVersion(req: Request, res: Response) {
   }
 }
 
-router.post('/validate-license', handleValidateLicense);
+router.post('/validate-license', clientValidationLimiter, handleValidateLicense);
 router.all('/latest-version', handleLatestVersion);
 
 export default router;

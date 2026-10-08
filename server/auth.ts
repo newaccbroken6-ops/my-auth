@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { query } from './db.js';
 
@@ -11,6 +11,7 @@ export interface AuthUser {
   username?: string | null;
   avatar_url?: string | null;
   is_banned?: boolean;
+  token_version?: number;
 }
 
 export interface AuthRequest extends Request {
@@ -23,9 +24,10 @@ export function generateToken(user: AuthUser): string {
       id: user.id,
       email: user.email,
       role: user.role,
+      token_version: user.token_version || 1,
     },
     JWT_SECRET,
-    { expiresIn: '30d' }
+    { expiresIn: '15m' }
   );
 }
 
@@ -38,11 +40,16 @@ export async function authenticateToken(req: AuthRequest, res: Response, next: N
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email: string; role: 'user' | 'admin' };
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      email: string;
+      role: 'user' | 'admin';
+      token_version?: number;
+    };
     
     // Fetch fresh user record
     const result = await query(
-      'SELECT id, email, username, role, is_banned, ban_reason, avatar_url FROM profiles WHERE id = $1',
+      'SELECT id, email, username, role, is_banned, ban_reason, avatar_url, token_version FROM profiles WHERE id = $1',
       [decoded.id]
     );
 
@@ -53,6 +60,13 @@ export async function authenticateToken(req: AuthRequest, res: Response, next: N
     const user = result.rows[0];
     if (user.is_banned) {
       return res.status(403).json({ error: 'Account is banned', ban_reason: user.ban_reason });
+    }
+
+    // Verify token version (revocation check - Section 11.6)
+    const currentVersion = user.token_version || 1;
+    const tokenVersion = decoded.token_version || 1;
+    if (tokenVersion !== currentVersion) {
+      return res.status(401).json({ error: 'Session has been revoked. Please log in again.' });
     }
 
     req.user = user;
@@ -71,14 +85,24 @@ export async function optionalAuth(req: AuthRequest, res: Response, next: NextFu
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email: string; role: 'user' | 'admin' };
+    const decoded = jwt.verify(token, JWT_SECRET) as {
+      id: string;
+      email: string;
+      role: 'user' | 'admin';
+      token_version?: number;
+    };
     const result = await query(
-      'SELECT id, email, username, role, is_banned, ban_reason, avatar_url FROM profiles WHERE id = $1',
+      'SELECT id, email, username, role, is_banned, ban_reason, avatar_url, token_version FROM profiles WHERE id = $1',
       [decoded.id]
     );
 
     if (result.rows.length > 0 && !result.rows[0].is_banned) {
-      req.user = result.rows[0];
+      const user = result.rows[0];
+      const currentVersion = user.token_version || 1;
+      const tokenVersion = decoded.token_version || 1;
+      if (tokenVersion === currentVersion) {
+        req.user = user;
+      }
     }
   } catch {
     // Ignore invalid token in optionalAuth

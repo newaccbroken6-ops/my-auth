@@ -1,0 +1,1910 @@
+================================================================================
+ ARCHITETTURA DI SICUREZZA COMPLETA PER SITO / APPLICAZIONE WEB
+ Progetto defense-in-depth, Zero Trust, pronto per la produzione
+ Versione 1.0 - 07/10/2026
+================================================================================
+
+INDICE
+  0. Premesse, assunzioni, limiti onesti
+  1. Security Architecture
+  2. Network Diagram ASCII
+  3. Traffic Flow
+  4. Proxy Architecture
+  5. Origin Protection
+  6. Firewall Rules
+  7. TLS Architecture
+  8. WAF Policy
+  9. DDoS Protection
+ 10. Rate Limiting
+ 11. API Security
+ 12. Authentication & Authorization (cookie, sessioni, header)
+ 13. Admin Security
+ 14. Logging & Monitoring (incl. rilevamento anomalie)
+ 15. Server Hardening
+ 16. CI/CD Security
+ 17. Backup & Disaster Recovery
+ 18. Threat Model (incl. privacy/metadata e "cosa succede se cade")
+ 19. Security Testing Plan
+ 20. Implementation Roadmap
+ A. Domande aperte per personalizzare il progetto
+
+Legenda priorita': [CRITICAL] [HIGH] [MEDIUM] [LOW]
+Ogni componente e' descritto con lo schema:
+  COSA / DOVE / PERCHE' / PROTEGGE / RISCHI RESIDUI / CONFIG / DIPENDENZE /
+  ALTERNATIVE / PRIORITA' / SE VIENE COMPROMESSO
+
+================================================================================
+0. PREMESSE, ASSUNZIONI, LIMITI ONESTI
+================================================================================
+
+ASSUNZIONI (da confermare, vedi sezione A)
+  - Applicazione web con frontend + API, backend containerizzato (Docker/K8s o
+    VM), database relazionale (PostgreSQL), eventuale cache (Redis) e object
+    storage per upload.
+  - Provider edge/CDN con WAF e DDoS (esempi: Cloudflare, Akamai, Fastly,
+    AWS CloudFront + Shield + WAF). Il progetto e' vendor-neutral: i nomi
+    delle funzioni cambiano, i principi no.
+  - Hosting su cloud (VPC) o dedicato con firewall controllabile.
+  - Traffico utenti in Europa -> requisiti GDPR sui log e sui dati personali.
+
+PRINCIPI GUIDA
+  P1. Il client non e' mai affidabile: ogni controllo lato client e' solo UX.
+  P2. Nessun singolo livello e' sufficiente: ogni controllo ha un "backstop"
+      indipendente al livello successivo.
+  P3. Default deny: tutto e' vietato finche' non e' esplicitamente permesso.
+  P4. Privilegio minimo: per utenti, processi, servizi, credenziali, rete.
+  P5. Credenziali di breve durata, ruotate, mai nel codice.
+  P6. Tutto cio' che e' rilevante per la sicurezza viene loggato, centralizzato
+      e monitorato.
+  P7. Ogni misura ha una modalita' di guasto nota e un piano (fail-closed per
+      auth/autorizzazione; fail-open controllato solo per componenti di
+      sola mitigazione, es. bot score, con monitoraggio).
+
+LIMITI ONESTI (da leggere prima di tutto)
+  L1. Nessun sistema e' "inviolabile". Questo progetto riduce superficie e
+      impatto, non elimina il rischio.
+  L2. Nascondere l'IP origin NON e' una difesa: e' un ostacolo. La difesa vera
+      e' che l'origin rifiuti tutto cio' che non arriva dall'edge autenticato.
+      L'IP puo' trapelare da: storico DNS, certificati (Certificate
+      Transparency), email in uscita, sottodomini non protetti, webhook/
+      callback verso terzi, errori applicativi, scansioni di Internet.
+      Se trapela, il firewall + mTLS devono renderlo inutilizzabile.
+  L3. Il WAF e' un controllo compensativo: non sostituisce codice sicuro,
+      validazione input, query parametrizzate, autorizzazione server-side.
+  L4. L'edge provider vede il traffico in chiaro (termina TLS): e' un
+      soggetto di fiducia e un punto di concentrazione del rischio.
+  L5. Anonimato assoluto non esiste (vedi sez. 18.3).
+  L6. DDoS volumetrico oltre la capacita' del provider, o attacchi L7 "low and
+      slow" ben mimetizzati, possono comunque degradare il servizio.
+  L7. Insider, account amministrativi compromessi e supply chain compromessa
+      aggirano gran parte dei controlli perimetrali: servono controlli
+      interni (MFA, audit, firma artifact, segmentazione).
+
+================================================================================
+1. SECURITY ARCHITECTURE
+================================================================================
+
+1.1 LIVELLI E RESPONSABILITA'
+
+ +-----+------------------------+--------------------------------------------+
+ | Liv | Componente             | Funzione di sicurezza principale           |
+ +-----+------------------------+--------------------------------------------+
+ | L0  | DNS (autoritativo)     | Risoluzione affidabile, DNSSEC, CAA,       |
+ |     |                        | registrar lock, anti-hijack                |
+ | L1  | CDN / Edge             | Terminazione TLS pubblica, cache, mascheram|
+ |     |                        | ento IP origin, filtro geografico/ASN      |
+ | L2  | DDoS (edge)            | Assorbimento L3/L4/L7 volumetrico          |
+ | L3  | WAF + Bot mgmt (edge)  | Filtro L7, regole OWASP, bot, rate limit   |
+ | L4  | Origin firewall        | Solo IP/tunnel dell'edge, default deny     |
+ | L5  | Reverse proxy / LB     | mTLS dall'edge, normalizzazione HTTP, rate |
+ |     | (Nginx/HAProxy/Envoy)  | limit locale, header trusted, WAF locale   |
+ | L6  | API Gateway            | AuthN/AuthZ coarse, schema validation,     |
+ |     |                        | quote per client, versioning               |
+ | L7  | Application server     | AuthZ fine, validazione, logica business   |
+ | L8  | Database/servizi int.  | Accessibile solo da app, cifrato, auditing |
+ | LX  | Piani laterali         | Admin (ZTNA), CI/CD, logging/SIEM, backup, |
+ |     |                        | secret manager                             |
+ +-----+------------------------+--------------------------------------------+
+
+1.2 CAPACITA' CHIAVE PER LIVELLO
+
+--- L0: DNS ---
+  COSA      : Provider DNS con anycast, DNSSEC attivo, record CAA, registrar
+              lock + MFA hardware sull'account registrar, SPF/DKIM/DMARC.
+  DOVE      : Esterno (pubblico per natura).
+  PERCHE'   : Il DNS e' il primo punto di dirottamento (hijack, takeover).
+  PROTEGGE  : Da DNS hijacking, emissione certificati non autorizzati (CAA),
+              spoofing email.
+  RISCHI RES: Registrar/account compromesso; sottodomini dangling.
+  CONFIG    : Solo record proxati verso l'edge per host web. NIENTE record
+              che puntano all'IP origin (es. "origin.example.com", "mail.",
+              "ftp.", "cpanel."). Email transazionale da provider separato
+              (cosi' l'IP origin non compare negli header Received).
+              Monitorare record dangling (subdomain takeover).
+  ALTERNAT. : DNS multi-provider (resilienza).
+  PRIORITA' : HIGH
+  SE COMPROMESSO: l'attaccante dirotta il traffico/ottiene certificati.
+              Mitigazioni: registrar lock, CAA, CT monitoring, alert su
+              modifiche DNS.
+
+--- L1/L2/L3: Edge (CDN + DDoS + WAF) ---
+  COSA      : Servizio edge con proxy HTTP, WAF gestito + regole custom, bot
+              management, rate limiting, Authenticated Origin Pulls (mTLS)
+              o tunnel in uscita.
+  DOVE      : Tra Internet e l'origin. Tutti gli hostname pubblici proxati.
+  PERCHE'   : Unico livello in grado di assorbire DDoS volumetrico.
+  PROTEGGE  : Da DDoS, scansioni, exploit noti, bot, abuso API.
+  RISCHI RES: Bypass se l'origin e' raggiungibile; falsi positivi/negativi;
+              dipendenza dal provider; il provider vede il traffico in chiaro.
+  CONFIG    : Vedi sez. 7, 8, 9, 10.
+  ALTERNAT. : Piu' provider (multi-CDN) per resilienza.
+  PRIORITA' : CRITICAL
+  SE COMPROMESSO/AGGIRATO: l'origin deve comunque rifiutare il traffico non
+              autenticato (L4/L5) e applicare WAF locale + rate limit locale.
+
+--- L4/L5: Origin firewall + Reverse proxy ---
+  Vedi sez. 4, 5, 6.
+
+--- L6: API Gateway ---
+  Vedi sez. 11.
+
+--- L7/L8: App e DB ---
+  Vedi sez. 12, 15.
+
+1.3 PIANI LATERALI (CONTROL PLANES)
+  - Admin plane   : accesso solo via ZTNA/VPN + MFA + bastion/identity-aware
+                    proxy (sez. 13).
+  - CI/CD plane   : pipeline con segreti effimeri (OIDC), artifact firmati
+                    (sez. 16).
+  - Logging plane : SIEM/log store immutabile, rete separata (sez. 14).
+  - Backup plane  : account/tenant separato, immutabile (sez. 17).
+  - Secret plane  : secret manager/KMS/HSM (sez. 15.8).
+
+================================================================================
+2. NETWORK DIAGRAM ASCII
+================================================================================
+
+2.1 VISTA LOGICA (flusso utente)
+
+   [Utente / Browser / App]
+            |
+            |  (1) DNS query -> risposta = IP anycast dell'EDGE (mai l'origin)
+            v
+   +--------------------------------------------------------------+
+   |                  EDGE PROVIDER (zona pubblica)                |
+   |  DNS autoritativo -> CDN -> DDoS L3/L4/L7 -> WAF/Bot -> Rate  |
+   |  Termina TLS 1.3 (client->edge), HSTS, redirect HTTP->HTTPS   |
+   +-----------------------------+--------------------------------+
+                                 |
+          (2) NUOVA connessione TLS 1.3 + mTLS (cert client dell'edge)
+              oppure tunnel outbound-only avviato dall'origin
+                                 v
+   =============== CONFINE: ORIGIN FIREWALL (default deny) ===============
+                                 |
+   +-----------------------------+--------------------------------+
+   |  DMZ / PROXY TIER (subnet pubblica ristretta o privata+tunnel)|
+   |  Reverse proxy / LB (Nginx/HAProxy/Envoy)  - 2+ istanze (HA)  |
+   |  verifica mTLS, normalizza HTTP, WAF locale (ModSecurity/CRS) |
+   +-----------------------------+--------------------------------+
+                                 |  (3) TLS interno (mTLS service mesh o
+                                 |      cert interni short-lived)
+                                 v
+   +--------------------------------------------------------------+
+   |  APP TIER (subnet privata, nessuna route Internet diretta)    |
+   |  API Gateway  ->  Application servers (container, non-root)   |
+   +----------+----------------------+----------------------------+
+              |                      |
+              | (4) solo 5432/TLS    | (5) solo porte specifiche
+              v                      v
+   +------------------+     +---------------------------+
+   | DATA TIER (priv.)|     | INTERNAL SERVICES (priv.) |
+   | PostgreSQL (HA)  |     | Redis, queue, object store|
+   | cifrato a riposo |     | (auth + TLS, no pubblico) |
+   +------------------+     +---------------------------+
+
+2.2 VISTA DI SEGMENTAZIONE (zone e flussi consentiti)
+
+   INTERNET
+      |  (solo verso EDGE)
+      v
+   [Z1 EDGE] ----- 443 mTLS (solo range edge) -----> [Z2 PROXY/DMZ]
+                                                         |
+                                                    8443 mTLS
+                                                         v
+   [Z6 ADMIN/ZTNA] --SSH/HTTPS via bastion--> [Z3 APP] --5432--> [Z4 DATA]
+        |                                        |  \
+        | (solo da identity-aware proxy)         |   \--6379--> [Z4b CACHE]
+        |                                        |
+        |                              log push (outbound only)
+        |                                        v
+        |                                [Z5 MONITORING/LOG] (SIEM, immutabile)
+        |
+        +-- accesso a console cloud/KMS solo con MFA + ruoli temporanei
+
+   [Z7 BACKUP] <--- push cifrato one-way da Z4/Z3 (account separato,
+                    immutabile, nessun accesso di scrittura inverso)
+
+   [Z8 CI/CD] ---deploy via pipeline (OIDC, ruoli temporanei)---> Z3
+              (non accede mai direttamente a Z4 dati di produzione)
+
+2.3 ALTERNATIVA CONSIGLIATA: TUNNEL OUTBOUND-ONLY
+   Invece di aprire la 443 inbound all'origin, un daemon (es. cloudflared o
+   equivalente: agent del provider) sull'origin apre una connessione
+   in uscita verso l'edge. Risultato:
+     - l'origin puo' avere ZERO porte in ingresso dall'Internet;
+     - non esiste un IP origin da raggiungere/scansionare;
+     - il bypass del proxy diventa strutturalmente impossibile.
+   Rischi residui: dipendenza dal tunnel (HA con >= 2 connettori), credenziali
+   del tunnel da proteggere (secret manager, rotazione).
+   PRIORITA': HIGH (CRITICAL se si vuole eliminare il rischio "IP leak")
+
+================================================================================
+3. TRAFFIC FLOW
+================================================================================
+
+3.1 FLUSSO RICHIESTA (client -> origin), con controlli per passaggio
+
+  Passo | Cosa avviene                           | Controllo applicato
+  ------+----------------------------------------+------------------------------
+   1    | DNS risolve hostname                   | DNSSEC, record proxato
+   2    | Client apre TCP/QUIC verso edge        | DDoS L3/L4, SYN cookies,
+        |                                        | anti-spoofing, anycast
+   3    | Handshake TLS 1.3 (client<->edge)      | Cert valido, HSTS, ALPN,
+        |                                        | TLS min 1.2, no downgrade
+   4    | HTTP parsing all'edge                  | Normalizzazione, rifiuto
+        |                                        | richieste malformate/smuggling
+   5    | Reputazione IP / ASN / geo / bot score | Challenge, block, allow
+   6    | WAF (managed + custom)                 | SQLi/XSS/RCE/LFI/ecc.
+   7    | Rate limiting edge                     | Per IP/path/ASN/fingerprint
+   8    | Cache lookup (solo contenuto statico/  | Cache key sicura, no cache di
+        | pubblico)                              | risposte con Set-Cookie/auth
+   9    | Edge apre NUOVA connessione verso      | mTLS (Authenticated Origin
+        | origin                                 | Pulls) + validazione cert
+        |                                        | origin (Full Strict)
+  10    | Origin firewall                        | Allowlist range edge + tunnel
+  11    | Reverse proxy origin                   | Verifica cert client edge,
+        |                                        | sanitizza header, WAF locale,
+        |                                        | limiti dimensione/timeout
+  12    | API Gateway                            | JWT/OAuth validation, schema,
+        |                                        | quote per client
+  13    | Application                            | AuthZ server-side (RBAC/ABAC,
+        |                                        | object-level), validazione
+  14    | Database                               | Account least-privilege, query
+        |                                        | parametrizzate, TLS, audit
+  15    | Risposta -> header di sicurezza,       | Rimozione banner/header
+        | no info tecniche -> edge -> client     | interni, error page generiche
+
+3.2 FLUSSI CONSENTITI (riassunto)
+  Internet -> Edge                  : 80/443 (80 solo per redirect a 443)
+  Edge -> Proxy origin              : 443 (mTLS), solo da range edge ufficiali
+  Proxy -> App/API gateway          : 8443 (TLS/mTLS)
+  App -> DB                         : 5432 (TLS), solo da IP/SG dell'app
+  App -> Cache/Queue                : 6379/5672 (TLS+auth) solo da app
+  App -> Log collector              : 514/6514 o 443 outbound verso SIEM
+  Admin -> Bastion/IAP              : via ZTNA con MFA e device posture
+  CI/CD -> Deploy target            : via runner autorizzato, ruolo effimero
+  DB/App -> Backup                  : push cifrato one-way
+
+3.3 FLUSSI NEGATI (esempi non negoziabili)
+  - Internet -> qualsiasi porta dell'origin/app/DB diretta
+  - Internet -> SSH/RDP/pannelli admin/porte DB/porte di debug
+  - App tier -> Internet (egress libero): solo allowlist (es. API terze parti,
+    SIEM, update repo interni), mediante egress proxy
+  - Proxy -> DB direttamente
+  - Admin workstation -> DB direttamente (solo via bastion/sessione registrata)
+  - Qualsiasi zona -> Backup in scrittura inversa/cancellazione
+  - Edge -> porte diverse dalla 443 dell'origin
+
+================================================================================
+4. PROXY ARCHITECTURE
+================================================================================
+
+4.1 COMPONENTI
+  A) EDGE PROXY (managed, provider)
+     COSA      : CDN + WAF + rate limit + bot management.
+     DOVE      : Fuori dall'infrastruttura, davanti a tutto.
+     PERCHE'   : Assorbe attacchi prima che arrivino a te.
+     PRIORITA' : CRITICAL
+     SE COMPROMESSO: il provider vede/modifica il traffico. Mitigazioni:
+                 firma applicativa dei payload sensibili (es. webhook HMAC),
+                 contratto/SLA, 2FA e audit sull'account edge, least
+                 privilege sui token API dell'edge, log delle modifiche
+                 di configurazione edge.
+
+  B) ORIGIN REVERSE PROXY (self-managed)
+     COSA      : Nginx / HAProxy / Envoy (2+ istanze, HA, health check).
+     DOVE      : Proxy tier (DMZ), subito dietro l'origin firewall.
+     PERCHE'   : Secondo punto di controllo indipendente dal provider;
+                 termina mTLS; normalizza HTTP; fa rate limit locale;
+                 nasconde l'app.
+     PROTEGGE  : Bypass edge, smuggling, header spoofing, slow attack,
+                 body oversize.
+     RISCHI RES: Vulnerabilita' del proxy stesso (patch!), misconfigurazione.
+     DIPENDENZE: Cert interni, CA dell'edge per mTLS, log forwarder.
+     ALTERNAT. : Envoy/Istio gateway, AWS ALB + SG + WAF, Traefik.
+     PRIORITA' : CRITICAL
+     SE COMPROMESSO: accesso al traffico in chiaro tra proxy e app. Mitigare
+                 con proxy non-root, filesystem read-only, mTLS verso app,
+                 segmentazione, alert su processo anomalo.
+
+  C) API GATEWAY (vedi sez. 11)
+     PRIORITA' : HIGH
+
+4.2 CONFIGURAZIONE REVERSE PROXY (esempio Nginx, indicativo)
+
+  # --- globali ---
+  server_tokens off;
+  more_clear_headers Server;               # (modulo headers-more) o equivalente
+  client_max_body_size 2m;                 # alzare solo su endpoint upload
+  client_body_timeout   10s;
+  client_header_timeout 10s;
+  send_timeout          15s;
+  keepalive_timeout     15s;
+  large_client_header_buffers 4 8k;
+  ignore_invalid_headers on;
+  underscores_in_headers off;              # evita header-smuggling "_" vs "-"
+
+  # --- real IP: SOLO da edge fidato ---
+  # Elenco range dell'edge, aggiornato in automatico (job giornaliero + alert)
+  include /etc/nginx/edge_trusted_ips.conf;     # set_real_ip_from <range>;
+  real_ip_header    CF-Connecting-IP;           # header dedicato dell'edge
+                                                # (o X-Forwarded-For se
+                                                #  il provider lo garantisce)
+  real_ip_recursive on;
+
+  # --- rifiuta host non previsti (anti Host-header injection) ---
+  server {
+      listen 443 ssl default_server;
+      ssl_reject_handshake on;                  # nessun cert per host ignoti
+  }
+
+  # --- server vero ---
+  server {
+      listen 443 ssl;                           # http2 on;
+      server_name app.example.com;
+
+      ssl_protocols TLSv1.2 TLSv1.3;
+      ssl_client_certificate /etc/nginx/pki/edge_ca.pem;
+      ssl_verify_client on;                     # mTLS: solo l'edge passa
+      ssl_verify_depth 2;
+
+      # sanifica header "di fiducia": mai propagare quelli del client
+      proxy_set_header X-Forwarded-For   $remote_addr;   # o $realip_remote_addr
+      proxy_set_header X-Real-IP         $remote_addr;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header Forwarded         "";            # sovrascrivi/azzera
+      proxy_set_header Host              $host;
+      proxy_set_header Connection        "";            # no hop-by-hop dal client
+      proxy_set_header Upgrade           $http_upgrade; # solo se WS necessari
+
+      # request smuggling: HTTP/1.1 verso upstream, no riuso ambiguo
+      proxy_http_version 1.1;
+      proxy_pass_request_headers on;
+      # rifiuto esplicito di metodi non necessari
+      if ($request_method !~ ^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$) {
+          return 405;
+      }
+  }
+
+4.3 REGOLA D'ORO SUI PROXY
+  Ogni livello applica la propria normalizzazione e NON si fida degli header
+  ricevuti, tranne quelli impostati da un hop fidato e autenticato.
+  Tipicamente: l'edge sovrascrive X-Forwarded-For; il proxy origin lo
+  riscrive; l'app lo legge solo dal proxy.
+
+================================================================================
+5. ORIGIN PROTECTION
+================================================================================
+
+5.1 STRATEGIA A 4 STRATI INDIPENDENTI (se uno cade, gli altri tengono)
+
+  STRATO 1 - Rete: firewall/Security Group con allowlist dei range edge
+             (aggiornamento automatico) oppure tunnel outbound-only.
+  STRATO 2 - Trasporto: mTLS. L'origin accetta solo client con certificato
+             emesso dalla CA dell'edge (Authenticated Origin Pulls) o da una
+             CA privata tua con cert per-zona/per-account (piu' sicuro del
+             cert condiviso del provider).
+  STRATO 3 - Applicativo: header segreto di edge ("shared secret" ruotato) e/o
+             firma/HMAC; richieste senza il segreto -> 403 al proxy.
+             NOTA: e' un controllo debole se da solo (header intercettabili),
+             utile come backstop.
+  STRATO 4 - Host/SNI: rifiuto di richieste con Host/SNI non attesi e di
+             accessi via IP (vedi default_server con ssl_reject_handshake).
+
+  IMPORTANTE: l'allowlist per IP dell'edge NON basta se il provider e' un
+  servizio multi-tenant: un altro cliente dello stesso edge puo' inviare
+  traffico dai medesimi IP verso il tuo origin se l'IP e' noto. Per questo
+  servono mTLS con cert legato al TUO account/zona o un tunnel.
+
+5.2 CHECKLIST DI PROTEZIONE ORIGIN
+  [CRITICAL] Nessuna porta inbound dall'Internet generale (0.0.0.0/0).
+  [CRITICAL] Origin raggiungibile SOLO da edge (range allowlist + mTLS) o
+             tunnel.
+  [CRITICAL] Nessun record DNS pubblico verso l'IP origin.
+  [CRITICAL] SSH/RDP/DB/pannelli: mai pubblici; solo via ZTNA/bastion.
+  [HIGH]     IP origin "ruotabile": se trapela, si cambia IP e si ripulisce
+             lo storico (provider cloud con IP elastici/DHCP controllato).
+  [HIGH]     Verifica periodica (Censys/Shodan sul tuo ASN/IP, scansione
+             interna dall'esterno) che l'IP origin non risponda a Internet.
+  [HIGH]     Email in uscita, webhook, monitoring esterno: mai dall'IP origin
+             (usare provider SMTP/NAT egress separato).
+  [HIGH]     Cert dell'origin NON emesso con nome che riveli infrastruttura
+             (CT log e' pubblico!): usare cert privati interni per la tratta
+             edge->origin e cert pubblici solo per l'edge.
+  [MEDIUM]   Egress dell'origin con NAT dedicato (IP diverso da quello di
+             ingresso) per evitare correlazioni.
+  [MEDIUM]   Pagina/response di default per accessi diretti: connessione
+             chiusa (444 in Nginx) senza informazioni.
+
+5.3 GESTIONE DEGLI IP REALI DEI CLIENT
+
+  DEFINIZIONI
+    X-Forwarded-For (XFF) : lista "client, proxy1, proxy2". Spoofabile dal
+                            client se qualcuno non la sovrascrive.
+    Forwarded (RFC 7239)  : forma standard di XFF; stessi rischi.
+    X-Real-IP             : singolo IP; convenzione Nginx, non standard.
+    CF-Connecting-IP / True-Client-IP : header dedicati dal provider edge,
+                            impostati/sovrascritti dall'edge.
+
+  REGOLE
+    R1. Hai un elenco di trusted proxy (range edge + proxy interni).
+    R2. L'IP client si ricava risalendo la catena XFF DA DESTRA verso
+        sinistra fino al primo hop NON fidato: quello e' il client.
+        (real_ip_recursive on in Nginx; TrustedProxies in framework.)
+    R3. Se la connessione TCP/TLS NON arriva da un trusted proxy, IGNORA tutti
+        gli header forwarded e usa l'IP del socket.
+    R4. L'edge deve SOVRASCRIVERE (non appendere) l'header dedicato; il proxy
+        origin lo riscrive prima di inoltrare all'app.
+    R5. L'app non legge mai direttamente XFF dal client: legge solo l'header
+        impostato dal proxy origin.
+    R6. Rate limit, ban, audit e geolocalizzazione usano l'IP "risolto" dal
+        meccanismo R2, mai il primo valore XFF grezzo.
+    R7. Logga ENTRAMBI: IP del socket (hop precedente) e IP client risolto,
+        piu' la catena XFF grezza per forensics.
+    R8. IPv6: aggrega i limiti per /64 (un singolo utente ha interi /64).
+    R9. CGNAT/proxy aziendali: molti utenti per un IP -> combina IP con altri
+        segnali (account, token, fingerprint) per non bloccare innocenti.
+
+  ATTACCHI TIPICI E CONTROMISURE
+    - XFF spoofing per evadere rate limit -> R2/R3/R4.
+    - Iniezione di log via header (newline) -> sanifica, logga in JSON.
+    - Falsificare Host/X-Forwarded-Host per poisoning o password-reset
+      poisoning -> Host allowlist fissa lato app; mai costruire URL da Host
+      non validato.
+
+5.4 ACCESSO AMMINISTRATIVO E DEPLOYMENT
+  - Nessun SSH aperto a Internet. Accesso con:
+      * ZTNA / identity-aware proxy (es. Cloudflare Access, Tailscale con ACL,
+        Teleport, AWS SSM Session Manager, Google IAP, Boundary);
+      * oppure bastion con VPN WireGuard + MFA + device posture.
+  - SSH: chiavi hardware (FIDO2/ed25519-sk) o certificati SSH di breve durata
+    (CA SSH), no password, no root login, log di sessione registrati.
+  - Deploy: nessun accesso interattivo in produzione per rilasciare; la
+    pipeline (OIDC, ruoli temporanei) esegue il deploy. Accesso "break-glass"
+    separato, loggato e con approvazione.
+  - Il pannello admin dell'app e' un'altra superficie: vedi sez. 13.
+  PRIORITA': CRITICAL
+  SE COMPROMESSO: un attaccante con accesso admin controlla l'origin.
+  Mitigazioni: MFA hardware, sessioni brevi, JIT access, session recording,
+  alert su accessi fuori orario/geo, segmentazione per limitare movimento
+  laterale.
+
+================================================================================
+6. FIREWALL RULES
+================================================================================
+
+6.1 POLITICA GENERALE
+  - Default: DROP su INPUT, FORWARD e OUTPUT (egress controllato).
+  - Stateful: ESTABLISHED,RELATED consentito.
+  - Regole per zona, minimali e commentate; sorgenti per nome/oggetto
+    (security group, tag), non IP hardcodati dove possibile.
+  - Infrastruttura come codice: le regole sono in Git, revisionate, applicate
+    da pipeline; drift detection e alert.
+  - Doppio livello: firewall di rete (cloud SG/NACL o appliance) + firewall
+    host (nftables). Se uno viene dimenticato, l'altro regge.
+
+6.2 MATRICE FLUSSI (ALLOW esplicito; tutto il resto DENY)
+
+  Sorgente            -> Destinazione        Porta/Proto      Note
+  ----------------------------------------------------------------------------
+  Internet            -> EDGE (provider)     80,443 tcp/udp   Gestito dal provider
+  Range EDGE          -> Proxy origin        443/tcp          + mTLS
+  (oppure tunnel)     (outbound dal proxy)   443/tcp out      Nessun inbound
+  Proxy origin        -> API GW / App        8443/tcp         TLS/mTLS
+  App                 -> DB                  5432/tcp         TLS + user dedicato
+  App                 -> Redis/Queue         6379|5671/tcp    TLS + auth
+  App                 -> Object storage      443/tcp          Allowlist endpoint
+  App                 -> Egress proxy        3128|443/tcp     Allowlist domini
+  Tutti (zone interne)-> Log collector       6514|443/tcp     TLS, solo push
+  Monitoring          -> Target (metriche)   9100|9xxx/tcp    Solo da monitoring
+  Bastion/IAP         -> Admin target        22/tcp (o SSM)   Solo da ZTNA
+  CI/CD runner        -> Deploy endpoint     443/tcp          Ruolo effimero
+  DB/App              -> Backup target       443/tcp out      Push-only
+  DNS interno         -> Resolver            53/udp,tcp       Solo resolver interni
+  NTP                 -> Sorgenti NTP fidate 123/udp          Tempo affidabile
+
+  NEGATI ESPLICITI: Internet->tutto tranne edge; Proxy->DB; Admin->DB diretto;
+  App->Internet generico; qualsiasi->Backup in scrittura/cancellazione;
+  qualsiasi->porte di debug (9229, 5005, 2375/2376 Docker API, 6443 K8s API
+  pubblico, 10250 kubelet).
+
+6.3 ESEMPIO nftables PER IL PROXY ORIGIN (indicativo)
+
+  table inet filter {
+    set edge_v4 { type ipv4_addr; flags interval; }   # popolato da job
+    set edge_v6 { type ipv6_addr; flags interval; }
+    chain input {
+      type filter hook input priority 0; policy drop;
+      ct state established,related accept
+      ct state invalid drop
+      iif lo accept
+      ip  saddr @edge_v4 tcp dport 443 accept
+      ip6 saddr @edge_v6 tcp dport 443 accept
+      ip protocol icmp icmp type { destination-unreachable, time-exceeded } accept
+      # SSH: NON aperto; accesso solo via IAP/SSM/VPN interna
+      ip saddr 10.20.0.0/28 tcp dport 22 accept    # solo bastion, se usato
+      limit rate 5/minute log prefix "DROP_INPUT: "
+    }
+    chain forward { type filter hook forward priority 0; policy drop; }
+    chain output {
+      type filter hook output priority 0; policy drop;
+      ct state established,related accept
+      oif lo accept
+      ip daddr 10.30.0.0/24 tcp dport 8443 accept   # verso app tier
+      ip daddr <SIEM> tcp dport 6514 accept         # log
+      udp dport 53 ip daddr <resolver> accept
+      udp dport 123 ip daddr <ntp> accept
+    }
+  }
+
+6.4 MITIGAZIONI ANTI-SPOOFING / RETE
+  - rp_filter=1 (reverse path filtering), no source routing, no ICMP redirect,
+    SYN cookies attivi (net.ipv4.tcp_syncookies=1).
+  - Bogon/martian bloccati dall'Internet sull'interfaccia pubblica.
+  - IPv6: stesse regole di IPv4 (errore comune: dimenticare ip6tables/SG v6).
+  PRIORITA': CRITICAL
+  SE COMPROMESSO/ERRATO: un firewall troppo permissivo espone l'origin. Per
+  questo: drift detection, test automatici di raggiungibilita' dall'esterno,
+  doppio livello (cloud SG + host).
+
+================================================================================
+7. TLS ARCHITECTURE
+================================================================================
+
+7.1 DUE TRATTE DISTINTE
+
+  TRATTA A: Client -> Edge (pubblica)
+    - TLS 1.3 preferito, TLS 1.2 come minimo (disabilita 1.0/1.1/SSLv3).
+    - Cipher suite TLS 1.3 standard (AES-GCM, ChaCha20-Poly1305). Per TLS 1.2:
+      solo ECDHE + AEAD (AES-GCM / ChaCha20); niente RSA key exchange, CBC,
+      RC4, 3DES, export, NULL.
+    - Certificato pubblico ECDSA P-256 (o doppio ECDSA+RSA 2048/3072 per
+      compatibilita'). Emissione ACME (Let's Encrypt/ZeroSSL/CA provider).
+    - HTTP/2 e HTTP/3 (QUIC) abilitati all'edge; OCSP stapling (se supportato);
+      session tickets con rotazione chiavi frequente.
+    - "Always use HTTPS": redirect 301 HTTP->HTTPS all'edge.
+    - HSTS: Strict-Transport-Security: max-age=31536000; includeSubDomains
+      (aggiungere "preload" SOLO dopo verifica che TUTTI i sottodomini
+      funzionino in HTTPS; il preload e' difficile da annullare).
+      Rollout graduale: 5 min -> 1 giorno -> 1 settimana -> 6 mesi -> 1 anno.
+    - CAA su DNS: autorizza solo le CA scelte (+ iodef per notifiche).
+    - Certificate Transparency monitoring: alert su cert emessi non attesi.
+    - Protezione downgrade: HSTS + TLS_FALLBACK_SCSV (gestito dal provider) +
+      disabilitazione versioni vecchie + no mixed content (CSP upgrade-
+      insecure-requests durante la migrazione).
+    - ECH (Encrypted Client Hello) se disponibile all'edge: riduce l'esposizione
+      del SNI (limiti: dipende da supporto client e dal provider).
+
+  TRATTA B: Edge -> Origin (privata, la piu' sottovalutata)
+    - MODO "Full (strict)": TLS verso l'origin con validazione completa del
+      certificato (catena + hostname). Mai "Flexible" (HTTP in chiaro) ne'
+      "Full" senza validazione.
+    - Certificato origin: CA privata/Origin CA del provider, lunga validita'
+      accettabile SOLO se rinnovata automaticamente; meglio breve (30-90 gg) e
+      auto-rinnovata.
+    - Authenticated Origin Pulls / mTLS: l'edge presenta un certificato client;
+      l'origin lo verifica. Preferire un certificato client specifico del TUO
+      account/zona (non quello condiviso globale), o CA privata con cert
+      emesso solo all'edge/tunnel.
+    - TLS 1.3 con suite forti; SNI e Host coerenti; ALPN h2/http1.1.
+    - Pinning facoltativo: pin della CA interna lato edge (se supportato), mai
+      pinning del singolo cert foglia senza processo di rotazione.
+
+7.2 TRATTA C: TRAFFICO INTERNO (proxy -> app -> DB -> servizi)
+    - TLS ovunque, anche in rete privata (la rete interna NON e' fidata).
+    - mTLS tra servizi (service mesh: Istio/Linkerd/Consul, oppure SPIFFE/SPIRE
+      per identita' di workload). Certificati di 1-24 ore, rinnovo automatico.
+    - DB: TLS richiesto lato server (hostssl in pg_hba.conf, sslmode=verify-full
+      lato client).
+    - Segreti e chiavi private in KMS/HSM/secret manager; permessi 0400, owner
+      dedicato; mai in immagini container o repository.
+
+7.3 RINNOVO E GESTIONE DEI CERTIFICATI
+    - Automazione ACME (certbot/lego/cert-manager) con test di rinnovo, alert a
+      -21 e -7 giorni dalla scadenza (se il rinnovo fallisce).
+    - Inventario certificati (CT logs, scanner interno); proprietario per ogni
+      cert; revoca documentata.
+    - Rotazione chiavi: nuova chiave a ogni rinnovo (--reuse-key disabilitato).
+    - Procedura di emergenza per compromissione chiave: revoca, riemissione,
+      aggiornamento OCSP, rotazione dei segreti collegati.
+
+7.4 CONFIGURAZIONE ESEMPIO (Nginx, interna/origin)
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers   ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:
+                  ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:
+                  ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;       # consigliato con suite moderne
+    ssl_session_timeout 1h;
+    ssl_session_tickets off;             # o con rotazione chiavi frequente
+    ssl_stapling on; ssl_stapling_verify on;   # se cert pubblico
+    ssl_ecdh_curve X25519:prime256v1:secp384r1;
+
+  PRIORITA': CRITICAL (tratta B, mTLS e HSTS), HIGH (TLS interno, CAA/CT).
+  RISCHI RES.: il provider decifra il traffico all'edge; endpoint mobili
+    vecchi incompatibili con TLS 1.2+ (valutare); chiave privata rubata.
+  SE COMPROMESSO: chiave origin rubata -> impersonificazione dell'origin e
+    MITM sulla tratta B; mitigazione: mTLS (l'attaccante non ha il cert
+    client), rotazione rapida, tunnel outbound-only, HSM/KMS per chiavi.
+
+================================================================================
+8. WAF POLICY
+================================================================================
+
+8.1 ARCHITETTURA WAF A PIU' LIVELLI (nessun singolo punto di errore)
+
+  LIVELLO W1 - WAF EDGE (managed): ruleset del provider + OWASP Core Rule Set
+    equivalente, rule update automatici, bot management, reputazione IP.
+  LIVELLO W2 - WAF ORIGIN (ModSecurity v3 + OWASP CRS, oppure Coraza, oppure
+    NAXSI/Envoy ext_authz): attivo sul reverse proxy origin. Se l'edge viene
+    aggirato o va in degrado, questo livello continua a filtrare.
+  LIVELLO W3 - VALIDAZIONE APPLICATIVA: schema validation, parametri tipizzati,
+    ORM/prepared statements, output encoding, CSP. Il WAF non sostituisce questo.
+  LIVELLO W4 - WAF per API/GraphQL: policy specifiche (introspezione off in
+    produzione, limiti profondita'/complessita' query, allowlist operazioni).
+
+8.2 MODALITA' OPERATIVE
+    1. Detection-only (2-4 settimane) con log completi, tuning falsi positivi.
+    2. Blocking per categorie ad alta confidenza (SQLi, RCE, LFI, scanner).
+    3. Blocking esteso con anomaly scoring (CRS paranoia level 1 -> 2).
+    4. Continuo: revisione settimanale falsi positivi/negativi, regole custom.
+  FAIL-MODE: fail-closed sui path sensibili (login, admin, pagamenti); fail-
+  open controllato (con alert) sulle risorse statiche se il WAF e' in errore.
+  Zero single point of failure: WAF origin in HA, deploy canary delle regole,
+  rollback rapido, regole versionate in Git.
+
+8.3 POLICY PER CATEGORIA
+
+  CATEGORIA                  | REGOLA / AZIONE
+  ---------------------------+----------------------------------------------
+  SQL Injection              | CRS SQLi + validazione/ORM. Block su
+                             | score >= soglia. Backstop vero: query
+                             | parametrizzate + utente DB senza DDL.
+  XSS                        | CRS XSS + output encoding contestuale + CSP
+                             | con nonce. Block/log, sanitizzazione HTML con
+                             | libreria (es. DOMPurify) per rich text.
+  Command injection / RCE    | Block su metacaratteri shell nei parametri
+                             | sensibili; no esecuzione shell lato app; no
+                             | deserializzazione non fidata.
+  Path traversal / LFI / RFI | Block "../", encoded varianti, wrapper (php://,
+                             | file://, data://); allowlist percorsi; RFI:
+                             | URL esterni non ammessi nei parametri di file.
+  SSRF                       | Block verso metadata cloud (169.254.169.254,
+                             | fd00:ec2::254), loopback, RFC1918 nei parametri
+                             | URL; IMDSv2 only; egress allowlist.
+  Request smuggling          | Rifiuta richieste con Content-Length e
+                             | Transfer-Encoding insieme; TE non standard;
+                             | header duplicati ambigui; spazi/CR/LF/NUL negli
+                             | header; HTTP/1.0 keep-alive ambiguo. Edge e
+                             | proxy con parser strict + HTTP/2 end-to-end
+                             | oppure ri-serializzazione pulita (nessun
+                             | forwarding di raw bytes).
+  Protocol anomalies         | Block: metodi non standard, header oversize,
+                             | troppi header (>~50), URL/query oltre soglia
+                             | (es. 4-8 KB), encoding doppio/invalidi, Host
+                             | mancante, null byte, charset non attesi.
+  Metodi HTTP                | Allowlist per route: GET/HEAD/POST/PUT/PATCH/
+                             | DELETE/OPTIONS solo dove serve. TRACE/CONNECT
+                             | sempre bloccati. Override method header (X-HTTP-
+                             | Method-Override) bloccato se non necessario.
+  Payload grandi             | Body max per route (es. 1-2 MB API JSON, 10-25
+                             | MB upload dedicato); timeout lettura body
+                             | (slowloris/RUDY); limite profondita' JSON/XML
+                             | (anti billion laughs / XXE: DTD disabilitati).
+  Scanner / vulnerability    | Block user-agent noti e pattern (path come
+  scanner                    | /wp-admin, /.git, /.env, /phpmyadmin, /actuator,
+                             | /server-status se non usati) -> honeypot +
+                             | ban temporaneo IP dopo N hit (es. 5 in 1 min).
+  Bot malevoli               | Bot management (score, JA3/JA4 fingerprint, JS
+                             | challenge, behaviour). Allowlist bot verificati
+                             | (reverse DNS) per SEO. Challenge invisibile ->
+                             | managed challenge -> block.
+  Credential stuffing        | Rate limit per account+IP+device; CAPTCHA
+                             | adattivo; confronto password con breach list
+                             | (HIBP k-anonymity); alert su alto tasso di
+                             | fallimenti distribuiti; MFA obbligatorio.
+  Brute force                | Backoff esponenziale + lock temporaneo per
+                             | account; risposte uniformi (no user enumeration);
+                             | limite per IP/ASN.
+  Abuso API                  | Quote per API key/token, schema enforcement,
+                             | blocco su parametri sconosciuti, limiti su
+                             | paginazione (max page size), query complexity.
+  Richieste anomale          | Anomaly score su header, ordine header, user-
+                             | agent vs fingerprint TLS, velocita', sequenze
+                             | non umane.
+
+8.4 REGOLE CUSTOM MINIME (da installare subito)
+  - Blocca accessi a: /.git*, /.svn*, /.env*, /.ht*, /backup*, *.bak, *.old,
+    *.sql, *.zip, *.tar, *.gz (se non servono), /server-status, /actuator/*,
+    /debug*, /console*, /phpinfo*, source map pubbliche se non volute.
+  - Blocca richieste senza Host valido o con Host non allowlisted.
+  - Blocca query string > N, path > N, cookie > N byte.
+  - Challenge su login/registrazione/reset password/ricerca costosa.
+  - Geo/ASN: challenge o block su ASN datacenter per endpoint utente-only
+    (attenzione a falsi positivi: VPN legittime, partner).
+
+8.5 VALUTAZIONE E TUNING
+  - Metriche: tasso blocchi, falsi positivi (ticket), tempo di tuning, regole
+    in "count".
+  - Test regressione regole (suite payload benigni+malevoli) in CI.
+  - Evita "regola WAF = fix": ogni finding genera un fix nel codice.
+  PRIORITA': CRITICAL (W1+W3), HIGH (W2), MEDIUM (W4 se API/GraphQL).
+  RISCHI RES.: bypass con encoding/obfuscation, 0-day, falsi positivi che
+    bloccano business.
+  SE COMPROMESSO/AGGIRATO: validazione applicativa + query parametrizzate +
+    CSP + utente DB limitato riducono l'impatto; WAF origin come secondo
+    livello.
+
+================================================================================
+9. DDoS PROTECTION
+================================================================================
+
+9.1 RESPONSABILITA'
+
+  LAYER | ATTACCHI TIPICI              | CHI GESTISCE      | COME
+  ------+------------------------------+-------------------+--------------------
+  L3    | UDP/ICMP flood, reflection/  | EDGE/PROVIDER     | Anycast, scrubbing
+        | amplification (DNS, NTP,     | (cloud scrubbing  | center, filtri
+        | memcached), IP spoofing      | + ISP/hosting)    | automatici; origin
+        |                              |                   | invisibile
+  L4    | SYN flood, ACK flood, UDP    | EDGE + host       | SYN proxy/cookies,
+        | flood, connection exhaustion |                   | connection limits,
+        |                              |                   | conntrack tuning
+  L7    | HTTP flood, slowloris,       | EDGE (primario) + | Rate limit, bot
+        | RUDY, cache busting, API     | ORIGIN (secondo   | mgmt, challenge,
+        | abuse, expensive queries,    | livello) + APP    | cache, timeouts,
+        |                              | (circuit breaker) | limiti per costo
+
+9.2 PRINCIPIO: IL TRAFFICO NON DEVE MAI ARRIVARE ALL'ORIGIN
+  - L'origin non e' raggiungibile fuori dal path edge (sez. 5): il flood
+    diretto verso l'IP origin viene scartato dal firewall del provider cloud
+    /upstream. Con tunnel outbound-only, non c'e' bersaglio.
+  - Verifica anche che l'hosting offra protezione DDoS di rete (es. AWS
+    Shield, Azure DDoS, protezione dell'ISP/datacenter) per il caso
+    "IP origin esposto".
+
+9.3 CONFIGURAZIONE EDGE
+  - DDoS always-on, sensitivity alta, attack mode on-demand ("Under Attack").
+  - Cache aggressiva per statici; cache anche di API pubbliche idempotenti
+    con TTL brevi; "stale-while-revalidate"/"serve stale on error".
+  - Challenge/captcha sui path costosi (ricerca, export, login).
+  - Limiti su connessioni per IP, richieste per IP/path/ASN/fingerprint.
+  - Protezione HTTP/2 specifici (Rapid Reset, CONTINUATION flood): il provider
+    deve avere mitigazioni aggiornate; tu limita stream concorrenti e
+    mantieni patch.
+  - Contratto: runbook con provider (contatti 24/7), soglie e SLA.
+
+9.4 CONFIGURAZIONE ORIGIN / HOST
+  - sysctl: net.ipv4.tcp_syncookies=1, tcp_max_syn_backlog alto,
+    somaxconn alto, tcp_fin_timeout ridotto, conntrack_max dimensionato.
+  - Proxy: worker_connections dimensionato, limit_conn per IP, timeout
+    stretti (header/body 10s), buffering corretto, limiti di richieste
+    concorrenti per upstream (max_conns) e coda.
+  - Autoscaling con budget limit (evita "denial of wallet").
+  - Separazione dei pool: login/API critici separati da contenuti pesanti.
+
+9.5 APPLICAZIONE (L7 RESILIENZA)
+  - Circuit breaker, bulkhead, timeout per ogni chiamata a DB/servizi.
+  - Backpressure e code con limite; degrado controllato (modalita' "read-only",
+    disattivazione feature costose, pagina statica di emergenza).
+  - Query lente: timeout lato DB, indici, protezioni N+1, limiti su ricerche.
+  - Pagine "costose" dietro autenticazione + quota; CAPTCHA per anonimi.
+
+9.6 RUNBOOK DDoS (sintesi)
+  1. Rileva (alert su RPS, 5xx, latenza, CPU, connessioni, banda).
+  2. Conferma e classifica (L3/L4/L7), identifica pattern (ASN, UA, path).
+  3. Attiva "Under Attack"/regole mirate/challenge, aumenta cache.
+  4. Se L7 mirato: limiti per path + blocchi per fingerprint JA3/JA4.
+  5. Comunica (status page), coinvolgi provider.
+  6. Post-incident: regole permanenti, capacity review.
+  PRIORITA': CRITICAL (edge DDoS), HIGH (L7 + resilienza app).
+  RISCHI RES.: attacchi oltre capacita'; L7 sofisticati ("low-and-slow"
+    realistici); costi da traffico.
+  SE COMPROMESSO: se l'edge e' saturo o il provider fuori servizio, l'origin
+    non deve restare esposto: multi-CDN/failover DNS, pagina statica su storage
+    separato, runbook di degrado controllato.
+
+================================================================================
+10. RATE LIMITING E TRAFFIC CONTROL
+================================================================================
+
+10.1 CHIAVI DI LIMITAZIONE (dimensioni indipendenti, combinabili)
+   - IP (aggregato /32 per v4, /64 per v6) e ASN
+   - Account (user id) - indipendente dall'IP
+   - Endpoint/route
+   - API key / client id / token (OAuth)
+   - Sessione / device fingerprint (cookie firmato + JA3/JA4 + header)
+   - Metodo HTTP (es. scritture molto piu' restrittive delle letture)
+   - Tenant/organizzazione (SaaS multi-tenant)
+
+10.2 ALGORITMI
+   - Token bucket (burst consentito, rate medio), leaky bucket (flusso
+     costante), sliding window (precisione), contatori distribuiti (Redis con
+     script atomici) con fallback locale se Redis e' giu'.
+   - Costo ponderato: richieste "costose" consumano piu' token.
+
+10.3 TABELLA LIMITI INDICATIVI (da tarare sul traffico reale)
+
+  ENDPOINT / CLASSE             | LIMITE (INDICATIVO)             | AZIONE
+  ------------------------------+---------------------------------+----------
+  Statici (cache)               | alto, limitato da edge/cache    | cache
+  Pagine pubbliche (GET)        | 60-120 req/min/IP               | throttle
+  API lettura autenticata       | 300-600 req/min/token           | 429+Retry
+  API scrittura (POST/PUT/DEL)  | 30-60 req/min/token             | 429
+  Login                         | 5 tentativi/15 min/account      | backoff,
+                                | + 10-20/15 min/IP               | CAPTCHA,
+                                | + 100/h/ASN                     | lock temp.
+  Registrazione                 | 3-5/h/IP, 1/min/device          | challenge
+  Reset password / OTP          | 3-5/h/account, 10/h/IP          | 429, delay
+  Verifica MFA                  | 5/15 min/sessione               | lock sess.
+  Ricerca / export / report     | 10-30/min/utente                | coda/quota
+  Upload                        | 5-20/h/utente + limite dimens.  | 429
+  Webhook in ingresso           | per mittente + firma HMAC       | drop
+  Endpoint admin                | 10-30/min/utente + IP allowlist | block+alert
+
+10.4 STRATEGIE PER SCENARIO
+  - BURST: token bucket con burst moderato; coda breve; 429 con Retry-After.
+  - SCRAPING: limiti per IP/ASN/fingerprint + honeypot link + CAPTCHA
+    adattivo, contenuto dinamico solo a sessioni valide; ponderare limiti per
+    ricchezza dati; watermarking dati sensibili. Limite: lo scraping lento e
+    distribuito non si elimina, si rende costoso.
+  - BRUTE FORCE: limite per account (non solo IP), backoff esponenziale,
+    risposte indistinguibili (user enumeration), notifica all'utente, MFA.
+  - CREDENTIAL STUFFING: attacco distribuito (molti IP, poche prove per
+    account). Segnali: tasso globale di fallimenti, molti account diversi dallo
+    stesso device/ASN, user-agent anomali. Azioni: challenge dinamico, blocco
+    per fingerprint, breach password check, MFA/passkey, forzare reset per
+    account in lista breach.
+  - API ABUSE: quote per client, scope minimi, limiti su paginazione,
+    idempotency keys, rilevamento enumerazione (ID sequenziali -> usare UUID e
+    controllo di autorizzazione per oggetto).
+  - BOT / AUTOMAZIONE: bot management + challenge progressivo + attestazione
+    (es. Private Access Tokens, Turnstile/hCaptcha/reCAPTCHA) + friction solo
+    quando il rischio sale (non per tutti).
+  - TRAFFICO ANOMALO: baseline per route/ora; deviazioni > N sigma -> alert e
+    modalita' protettiva (vedi sez. 14).
+
+10.5 QUANDO USARE COSA
+  - RATE LIMITING (429): comportamento normale oltre soglia.
+  - THROTTLING (rallentare, code): carico elevato ma legittimo, client
+    business.
+  - TEMPORARY BLOCK (minuti-ore): pattern chiaramente abusivi (scanner, brute
+    force confermato). Con scadenza e revisione, evita ban permanenti basati
+    su IP (CGNAT).
+  - CHALLENGE/CAPTCHA: traffico ambiguo/rischio medio, azioni sensibili.
+  - BOT MANAGEMENT: classificazione continua, non solo soglie.
+  - CIRCUIT BREAKER: protegge dipendenze interne dal collasso (non filtra
+    attacchi, protegge il sistema).
+
+10.6 IMPLEMENTAZIONE A DUE LIVELLI
+  - EDGE: limiti grossolani per IP/ASN/path (protegge l'origin).
+  - ORIGIN/GATEWAY/APP: limiti precisi per account/token/tenant (l'edge non
+    conosce l'identita'). Risposte standard: 429 + Retry-After + header
+    RateLimit-* (informativi).
+  PRIORITA': CRITICAL (login/reset/MFA), HIGH (API per token), MEDIUM (scraping).
+  RISCHI RES.: aggirabile con botnet residenziali/IP rotanti; falsi positivi su
+    CGNAT.
+  SE COMPROMESSO: se Redis/contatori falliscono -> fallback locale conservativo
+    (fail-closed sui login, fail-open limitato per letture pubbliche) + alert.
+
+================================================================================
+11. API SECURITY
+================================================================================
+
+11.1 PRINCIPI
+  - Ogni endpoint richiede autenticazione, salvo esplicita eccezione
+    documentata ("deny by default").
+  - Autorizzazione SEMPRE lato server, a livello di funzione E di oggetto
+    (previene BOLA/IDOR, BFLA, mass assignment).
+  - Contratto API (OpenAPI/GraphQL schema) e' la fonte di verita': tutto cio'
+    che non e' nel contratto viene rifiutato.
+
+11.2 API GATEWAY
+  COSA      : Kong / Envoy / Apigee / AWS API Gateway / Traefik (con plugin).
+  DOVE      : Dopo reverse proxy, prima dei servizi (app tier).
+  FUNZIONI  : verifica JWT/OAuth (firma, iss, aud, exp, nbf, scope), mTLS per
+              client B2B, schema validation (OpenAPI), rate limit/quote per
+              client, versioning, CORS centralizzato, request/response
+              transformation, logging uniforme, kill-switch per client/route.
+  PRIORITA' : HIGH
+  SE COMPROMESSO/AGGIRATO: il servizio deve comunque validare token e
+              autorizzazione (defense-in-depth: non fidarsi del gateway).
+
+11.3 AUTENTICAZIONE
+  - Utenti: OAuth 2.1/OIDC con Authorization Code + PKCE; IdP dedicato
+    (Keycloak, Auth0, Cognito, Entra ID, Okta...). Niente flussi Implicit/ROPC.
+  - Machine-to-machine: client credentials con mTLS o private_key_jwt; token
+    a breve durata; secret in secret manager.
+  - API key: solo per identificare progetto/client (non per autorizzare utenti),
+    memorizzate come hash, prefisso identificabile, rotazione, scope, IP
+    allowlist opzionale.
+  - Passkey/WebAuthn e MFA per utenti, obbligatori per ruoli privilegiati.
+
+11.4 AUTORIZZAZIONE
+  - RBAC + ABAC (attributi: tenant, proprieta' risorsa, stato). Policy engine
+    centralizzato (OPA/Cedar/Casbin) con test unitari.
+  - Controllo di proprieta' su ogni accesso a risorsa (WHERE tenant_id=...).
+  - Whitelist dei campi aggiornabili (anti mass-assignment); DTO separati
+    request/response.
+  - Mai affidarsi a campi forniti dal client per ruolo/prezzi/permessi.
+
+11.5 INPUT E OUTPUT
+  - Validazione schema (tipi, range, formato, lunghezza, enum) + rifiuto di
+    campi sconosciuti; canonicalizzazione Unicode; limiti su array/nesting.
+  - Payload limits: dimensione body, numero campi, profondita' JSON, max page
+    size, timeouts.
+  - Content-Type enforced (application/json) e Accept; rifiuta XML se non
+    serve (o disabilita DTD/XXE).
+  - Output: solo campi necessari (response filtering), niente stack trace o
+    dettagli interni; errori standard (RFC 9457 problem+json) con codici
+    interni opachi e correlation id.
+  - Protezione GraphQL: introspezione off in produzione, limiti profondita' e
+    costo, persisted queries/allowlist, disabilita batching illimitato.
+
+11.6 TOKEN E SESSIONI API
+  - Access token JWT: breve (5-15 min), firma asimmetrica (ES256/EdDSA),
+    algoritmo allowlisted (NO "none", NO confusione HS/RS), kid con JWKS,
+    audience specifica, claim minimi (niente dati sensibili nel payload:
+    e' leggibile).
+  - Refresh token: rotazione a ogni uso + rilevamento riuso (revoca famiglia),
+    legati al client/dispositivo (DPoP o mTLS-bound), storage sicuro
+    (cookie HttpOnly per web; keystore sicuro per mobile).
+  - Revoca: lista di revoca/introspezione per token ad alto rischio, "token
+    version" per utente, revoca immediata al cambio password/logout globale/
+    compromissione. Trade-off: JWT puri non revocabili prima della scadenza =>
+    durata breve + deny-list per eventi critici.
+  - Mai token in URL/query string (finiscono nei log, referer, cronologia).
+
+11.7 VERSIONING E LIFECYCLE
+  - /v1, /v2 o header di versione; deprecazione con Sunset header; inventario
+    API (niente "shadow/zombie API"); scansione periodica per endpoint non
+    documentati.
+
+11.8 ENDPOINT AMMINISTRATIVI
+  - Mai esposti pubblicamente (stesso gateway pubblico NO): API admin su host/
+    rete separati, raggiungibili solo via ZTNA + MFA + scope admin + rate limit
+    stretto + audit; richiesta con step-up auth per azioni sensibili.
+
+11.9 LOGGING API
+  - Log: client id, user id, route, metodo, status, latenza, size, decisione
+    authZ (allow/deny + policy), correlation id; MAI token, password, PII
+    completa, numeri carta nei log (redaction).
+  PRIORITA': CRITICAL (authZ per oggetto, token), HIGH (gateway, schema).
+  RISCHI RES.: logica business abusata anche con API "corrette"; BOLA da bug.
+  SE COMPROMESSO: token rubato -> breve durata, binding, revoca; chiave di
+    firma compromessa -> rotazione JWKS, invalidare tutte le sessioni.
+
+================================================================================
+12. AUTHENTICATION & AUTHORIZATION (COOKIE, SESSIONI, HEADER)
+================================================================================
+
+12.1 COOKIE DI SESSIONE (web)
+  Set-Cookie: __Host-sid=<id casuale >=128 bit>; Path=/; Secure; HttpOnly;
+              SameSite=Lax (o Strict per aree sensibili); Max-Age=...
+  - Prefisso __Host-: forza Secure, Path=/, nessun Domain (anti cookie tossing).
+  - Secure: solo HTTPS. HttpOnly: non accessibile da JS (mitiga furto via XSS).
+  - SameSite=Lax come baseline (protegge dalla maggior parte dei CSRF);
+    Strict per admin; None;Secure solo se indispensabile (embed cross-site).
+  - Identificatore di sessione opaco e casuale (CSPRNG), dati lato server
+    (Redis/DB cifrato) -- preferibile a JWT in cookie per la sessione web.
+  - Niente dati sensibili nel cookie. Dimensione contenuta.
+
+12.2 DURATA, ROTAZIONE, LOGOUT
+  - Idle timeout: 15-30 min (utenti), 5-15 min (admin).
+  - Absolute timeout: 8-12 h (utenti), 1-4 h (admin); "remember me" con token
+    separato, limitato e revocabile.
+  - Rotazione ID di sessione: al login, al cambio privilegi, a step-up MFA, al
+    cambio password. (Anti session fixation.)
+  - Logout: invalida server-side la sessione, cancella cookie (Max-Age=0),
+    revoca refresh token; "logout da tutti i dispositivi" disponibile.
+  - Re-autenticazione per azioni sensibili (cambio email/password, pagamenti,
+    admin) e notifica all'utente.
+  - Limite sessioni concorrenti per ruolo; visualizzazione sessioni attive.
+
+12.3 CSRF
+  - SameSite + token anti-CSRF (synchronizer o double-submit firmato legato
+    alla sessione) su richieste che modificano stato.
+  - Verifica Origin/Referer (Fetch Metadata: Sec-Fetch-Site/Mode) lato server.
+  - Mai cambiare stato con GET. CORS ristretto (allowlist origini esatte,
+    no "*" con credenziali).
+  - API con bearer token (non cookie): CSRF non applicabile, ma CORS/XSS si'.
+
+12.4 ATTACCHI COMUNI E CONTROMISURE
+  - Session fixation        -> rotazione ID al login.
+  - Session hijacking       -> TLS ovunque, HttpOnly, binding leggero (rilevare
+                               cambio drastico UA/ASN -> re-auth), timeout.
+  - XSS -> furto sessione   -> CSP, HttpOnly, output encoding, Trusted Types.
+  - CSRF                    -> sopra.
+  - Brute force / stuffing  -> sez. 10, MFA, breach check.
+  - Enumerazione utenti     -> messaggi e tempi uniformi su login/reset.
+  - Password reset poisoning-> Host fisso lato server, token monouso a breve
+                               scadenza, hash del token in DB.
+  - Open redirect           -> allowlist destinazioni post-login.
+  - Clickjacking            -> frame-ancestors 'none'/'self'.
+
+12.5 PASSWORD E MFA
+  - Hash: Argon2id (parametri tarati ~100-500 ms) o scrypt/bcrypt (cost >= 12);
+    salt unico; pepper in KMS opzionale. Nessun limite assurdo di lunghezza
+    (>= 64 caratteri), nessuna regola di composizione obbligata, controllo
+    breach (HIBP). NIST SP 800-63B come riferimento.
+  - MFA: passkey/WebAuthn (preferita, resistente al phishing), TOTP come
+    fallback; evitare SMS per ruoli privilegiati. Recovery code monouso,
+    conservati hashed. Resettare MFA richiede procedura verificata.
+  - Account lockout temporaneo + notifiche. Alert su login da nuovo device/
+    geo.
+
+12.6 AUTORIZZAZIONE
+  - Deny by default; RBAC con ruoli minimi; ABAC per proprieta'/tenant.
+  - Controlli SEMPRE nel backend, per ogni richiesta (non solo UI nascosta).
+  - Separazione tra identita' utente e identita' admin (stesso IdP ma realm/
+    pool, policy e MFA separati).
+  - Privilegi temporanei (JIT) per operazioni straordinarie.
+  PRIORITA': CRITICAL.
+  SE COMPROMESSO: sessione rubata -> timeout brevi, rotazione, binding e
+    alert; IdP compromesso -> segmentazione, MFA hardware per admin, break-
+    glass offline, monitoraggio dei cambiamenti IdP.
+
+12.7 HTTP SECURITY HEADERS (policy)
+
+  UTILI E CONSIGLIATI
+  - Strict-Transport-Security: max-age=31536000; includeSubDomains [; preload]
+  - Content-Security-Policy (principale difesa contro XSS):
+      default-src 'self';
+      script-src 'self' 'nonce-<random per request>' 'strict-dynamic';
+      style-src 'self' 'nonce-<random>';          # evita 'unsafe-inline'
+      img-src 'self' data: https:;
+      font-src 'self';
+      connect-src 'self' https://api.example.com;
+      object-src 'none'; base-uri 'none';
+      frame-ancestors 'none';                      # o 'self'
+      form-action 'self';
+      upgrade-insecure-requests;
+      report-to csp-endpoint;                      # + Report-To / Reporting-Endpoints
+    Rollout: prima Content-Security-Policy-Report-Only, poi enforce.
+  - X-Content-Type-Options: nosniff
+  - Referrer-Policy: strict-origin-when-cross-origin (o no-referrer su aree
+    sensibili)
+  - Permissions-Policy: disabilita cio' che non usi, es.
+      camera=(), microphone=(), geolocation=(), payment=(), usb=(),
+      interest-cohort=()
+  - Frame protection: CSP frame-ancestors (moderno) + X-Frame-Options: DENY
+    (compatibilita' legacy, innocuo).
+  - Cross-Origin-Opener-Policy: same-origin; Cross-Origin-Resource-Policy:
+    same-origin (o same-site); Cross-Origin-Embedder-Policy: require-corp solo
+    se serve isolamento (SharedArrayBuffer): puo' rompere integrazioni.
+  - Cache-Control: "no-store" (o "no-cache, private") per risposte
+    autenticate/sensibili (account, API con dati utente, admin); cache lunga
+    + "immutable" per asset versionati/hashati; mai cache condivisa di
+    risposte con Set-Cookie o dati utente (Vary corretto).
+  - Cookie con __Host- prefix e attributi sopra.
+
+  DA NON AGGIUNGERE / OBSOLETI / DA EVITARE
+  - X-XSS-Protection: non aggiungere (deprecato; in alcuni browser vecchi
+    introduceva vulnerabilita'). Se proprio, "0".
+  - Public-Key-Pins (HPKP): rimosso, pericoloso.
+  - Expect-CT: obsoleto.
+  - Server / X-Powered-By / X-AspNet-Version / X-Generator: da RIMUOVERE
+    (rivelano stack e versioni).
+  - CSP con 'unsafe-inline'/'unsafe-eval' o wildcard "*": svuotano la protezione.
+  - HSTS preload senza averlo valutato; COEP senza necessita'.
+  - Header "di sicurezza" ridondanti/contraddittori impostati sia da CDN sia da
+    origin: definire UN proprietario (di solito il proxy/app) per evitare
+    duplicati.
+  - CORS: Access-Control-Allow-Origin: * con credenziali; origini riflesse non
+    validate.
+  PRIORITA': HIGH (CSP, HSTS, nosniff, frame-ancestors), MEDIUM (altri).
+  SE COMPROMESSO: gli header sono difese di browser: se il browser li ignora,
+    il fix reale sta nel codice (output encoding, authZ).
+
+================================================================================
+13. ADMIN SECURITY
+================================================================================
+
+13.1 PRINCIPIO: L'AREA ADMIN E' UNA SUPERFICIE SEPARATA
+  - Hostname e rete separati (es. admin.internal.example.com), NON sotto lo
+    stesso path pubblico (/admin) dell'app utente. Non pubblicato in sitemap,
+    robots, JS pubblici, source map.
+  - Deployment separabile (ideale: servizio/istanza distinta, stesso codice
+    base ma configurazione e permessi diversi).
+
+13.2 ACCESSO
+  - ZTNA / identity-aware proxy davanti all'admin (Cloudflare Access, Google
+    IAP, Teleport, Tailscale con ACL, Pomerium, AWS Verified Access): verifica
+    identita' (SSO) + device posture (disco cifrato, OS aggiornato, EDR) PRIMA
+    che la richiesta raggiunga l'app.
+  - In subordine/in aggiunta: allowlist IP (uffici/VPN) e VPN WireGuard.
+    L'allowlist IP da sola e' debole (IP condivisi, VPN rubate): combina con
+    identita' e MFA.
+  - L'admin NON passa dal path pubblico dell'edge senza policy di accesso.
+
+13.3 AUTENTICAZIONE
+  - MFA obbligatorio resistente al phishing (WebAuthn/FIDO2 hardware key);
+    TOTP solo come fallback temporaneo. Nessun SMS.
+  - Account admin nominali, MAI condivisi; account "break-glass" offline,
+    segreti in cassaforte fisica/HSM, uso loggato e allertato.
+  - Sessione: idle 10-15 min, assoluta 1-4 h, re-auth per azioni sensibili
+    (step-up), cookie __Host-, SameSite=Strict.
+  - Brute force: lockout progressivo, limite per IP/account, alert immediato.
+
+13.4 AUTORIZZAZIONE
+  - RBAC a ruoli minimi (viewer, support, editor, security-admin, super-admin);
+    separazione dei compiti (chi approva non e' chi esegue per azioni critiche:
+    four-eyes su cancellazioni massive, export dati, cambio ruoli).
+  - Accesso privilegiato temporaneo (JIT/PAM): elevazione a tempo (es. 30-60
+    min) con motivazione e approvazione, revoca automatica.
+  - Separazione utenti normali / admin: tabelle/pool/identita' separate, nessun
+    "flag is_admin" modificabile via API utente.
+
+13.5 AUDIT E CONTROLLO
+  - Audit log append-only di ogni azione admin: chi, cosa, quando, da dove,
+    prima/dopo (diff), esito, correlation id. Inviato in tempo reale al SIEM
+    (immutabile), non modificabile dagli admin.
+  - Registrazione sessioni SSH/console (Teleport, SSM, ssm-session-logs).
+  - Alert: login admin da nuovo device/paese/orario anomalo, creazione admin,
+    cambio ruolo, disattivazione MFA, export massivi, modifica policy WAF/
+    firewall/DNS.
+  - Revisione periodica accessi (trimestrale), rimozione account inattivi,
+    offboarding automatizzato.
+
+13.6 PREVENZIONE ESPOSIZIONE
+  - Nessun pannello DB (phpMyAdmin, Adminer, pgAdmin), console (Grafana,
+    Kibana, Prometheus, Jenkins, Portainer, Kubernetes dashboard, Redis
+    Commander) pubblico: tutti dietro ZTNA.
+  - Endpoint di debug/health: /health minimale pubblico (solo "ok"), /metrics e
+    /actuator solo su rete interna.
+  PRIORITA': CRITICAL.
+  RISCHI RES.: phishing dell'admin, device compromesso, insider.
+  SE COMPROMESSO: account admin compromesso -> JIT riduce finestra,
+    four-eyes e audit immutabile limitano danni, rotazione credenziali e
+    revoca sessioni via runbook "admin compromesso" (sez. 18/20).
+
+================================================================================
+14. LOGGING & MONITORING (INCL. RILEVAMENTO ANOMALIE)
+================================================================================
+
+14.1 EVENTI DA REGISTRARE
+
+  CATEGORIA              | EVENTI                                  | DOVE
+  -----------------------+-----------------------------------------+---------
+  Richieste HTTP         | timestamp UTC, IP socket, IP client     | edge,
+                         | risolto, XFF grezzo, metodo, URL (senza | proxy,
+                         | query sensibili), status, bytes, UA,    | app
+                         | latenza, TLS version/cipher, JA3/JA4,   |
+                         | request id/trace id, utente (se noto)   |
+  Errori                 | 4xx/5xx, eccezioni (con stack SOLO nei  | app,
+                         | log interni), timeout, upstream error   | proxy
+  Autenticazioni         | login ok/ko, MFA ok/ko, reset password, | app/IdP
+                         | creazione/revoca token, nuovo device    |
+  Modifiche admin        | CRUD ruoli, utenti, config, export dati | app/audit
+  WAF                    | regola, azione, payload (redatto),      | edge,
+                         | score, fingerprint                      | origin
+  Firewall               | DROP/REJECT (campionati), nuove regole  | host,
+                         |                                         | cloud
+  Rate limit             | chiave, soglia, azione, count           | edge,
+                         |                                         | gw, app
+  Modifiche infra        | CloudTrail/Activity log, IaC apply,     | cloud
+                         | cambi IAM/SG/DNS/edge                   |
+  Accessi database       | login DB, query DDL, accessi anomali,   | DB (pgaudit),
+                         | export, errori auth                     | proxy DB
+  Deployment             | commit, build id, artifact digest,      | CI/CD
+                         | chi/quando/approvazione, rollback       |
+  Host/container         | sudo, SSH, processi sospetti, file      | auditd/
+                         | integrity, runtime events               | Falco
+
+  NON LOGGARE: password, token, chiavi, numeri di carta/CVV, dati sanitari,
+  contenuti completi di PII; applicare masking/redaction e minimizzazione GDPR.
+  Prevenire log injection: log in JSON strutturato, newline/escaping.
+
+14.2 REQUISITI DEI LOG
+  - CENTRALIZZATI: agent (Vector/Fluent Bit/OTel) -> SIEM/log store (Elastic,
+    OpenSearch, Splunk, Loki, Datadog, Sentinel, Chronicle). TLS + auth.
+  - PROTETTI DA MODIFICA: store in account/tenant separato, WORM/Object Lock,
+    hash chain/firma periodica, permessi in sola scrittura per le sorgenti,
+    nessun admin dei server puo' cancellare i log.
+  - TIMESTAMP AFFIDABILI: NTP/chrony con sorgenti autenticate (NTS) o time
+    service del cloud; UTC; monitorare drift; sequence number.
+  - RETENTION: hot 30-90 gg; warm/cold 12 mesi per sicurezza (adeguare a
+    normativa/GDPR e necessita'); audit admin e accessi 12-24 mesi; log con
+    IP personali: base giuridica, minimizzazione, anonimizzazione dopo X
+    giorni se non servono.
+  - MONITORATI: alert in tempo reale, dashboard, on-call, runbook.
+  - Correlazione tramite trace id propagato edge->proxy->app->DB.
+
+14.3 STACK CONSIGLIATO
+  - Metriche/SLO: Prometheus + Alertmanager / Grafana (dietro ZTNA).
+  - Log/SIEM: scelta unica (vedi sopra) + regole di rilevazione Sigma.
+  - Host/Container runtime: auditd, Falco/Tetragon, EDR.
+  - Uptime esterno: sonde da fuori (non dall'IP origin).
+  - File Integrity Monitoring (AIDE/Wazuh) su codice e config.
+  PRIORITA': CRITICAL (centralizzazione + audit admin), HIGH (alert), MEDIUM.
+
+14.4 RILEVAMENTO ANOMALIE: SCENARI, ALERT, AZIONI
+
+  RILEVAMENTO               | SEGNALE / SOGLIA (esempio)         | AZIONE AUTO
+  --------------------------+------------------------------------+-----------------
+  Picco di traffico         | RPS > baseline + 3 sigma o > 3x    | Alert; aumenta
+                            | media oraria per 5 min             | cache; challenge
+                            |                                    | su path caldi
+  Scansioni                 | > 10 404/403 distinti da stesso IP | Ban temp. 1h
+                            | in 1 min; hit su path honeypot     | (ASN se ripete)
+  Pattern automatizzati     | Intervalli regolari, no cookie/JS, | Challenge, poi
+                            | JA3 raro, UA incoerente            | block per FP
+  Richieste anomale         | Header strani, anomaly score alto, | Block + log
+                            | payload fuori schema               | completo
+  Attacchi ripetuti         | Stessa regola WAF > N volte/10 min | Ban progressivo
+                            | dallo stesso soggetto              | (1h, 24h, 7g)
+  Credential stuffing       | Failure rate globale login > 5x    | Attiva challenge
+                            | baseline; molti utenti, pochi IP   | su login, force
+                            | per utente                         | MFA, notifica
+  Account compromesso       | Login da nuovo paese/device,       | Step-up auth,
+                            | "impossible travel", cambio email/ | revoca sessioni,
+                            | MFA subito dopo login              | notifica utente
+  Accesso admin sospetto    | Fuori orario/geo, nuovo device,    | Blocca sessione,
+                            | spike di export, creazione admin   | revoca token,
+                            |                                    | page security
+  Modifiche non autorizzate | FIM su file app/config; deploy     | Alert P1, isola
+                            | fuori pipeline; cambio SG/DNS/IAM  | nodo, rollback
+                            | non da IaC                         | automatico
+  Esfiltrazione             | Volume uscita anomalo, query DB    | Throttle, alert,
+                            | massive, download ripetuti         | revoca credenz.
+  Accesso diretto all'origin| Qualsiasi richiesta non da edge    | Alert P1 (indica
+                            | (mTLS fail, IP non allowlist)      | leak IP/rete)
+  Cert/DNS anomali          | Nuovo cert in CT, modifica DNS     | Alert P1, verifica
+
+  AUTOMAZIONE (SOAR leggero): ban temporanei sono automatizzati con scadenza e
+  allowlist di sicurezza (non bannare monitor/partner/IP interni); le azioni
+  distruttive (isolare un server, bloccare un account admin) richiedono
+  conferma umana o sono limitate a "contenimento reversibile".
+  SE COMPROMESSO: se il SIEM e' accecato/cancellato -> log immutabili in
+    account separato + alert "log silence" (nessun log per N minuti).
+
+================================================================================
+15. SERVER HARDENING
+================================================================================
+
+15.0 PROTEZIONE FILE E CODICE (requisito 11): REGOLE TRASVERSALI
+  OBIETTIVO: utenti esterni non possono modificare file, caricare/eseguire file
+  arbitrari, leggere config, .env, repository, backup, temporanei, stack trace.
+  - Codice dell'app: immagine/artefatto IMMUTABILE; filesystem root read-only
+    (container: readOnlyRootFilesystem). Il processo web non ha permesso di
+    scrittura sulla directory del codice.
+  - Document root contiene SOLO asset pubblici (build statica). Codice,
+    config, template, .git, .env, backup, log, dump DB mai nella webroot.
+  - Blocca per regola (proxy + WAF): /.git, /.env, /.svn, /.DS_Store,
+    *.bak, *.old, *.orig, *.swp, *.sql, *.zip/.tar/.gz, composer.json/lock se
+    non necessari, /node_modules, /vendor, /WEB-INF, /config, /logs.
+  - Source map: non pubblicare in produzione (o servirle solo a ZTNA/ errore
+    tracker con upload privato).
+  - Errori: debug off, error page generiche, stack trace solo nel log interno
+    con correlation id; header e messaggi senza versioni/paths.
+  - Upload (se presenti):
+      * Storage separato dal codice (object storage o volume `noexec,nosuid,
+        nodev`), bucket privato, accesso via URL firmati a scadenza;
+      * Rinomina con UUID, rimuovi percorso utente, estensione da allowlist
+        basata sul contenuto (magic bytes), NON sul nome/Content-Type client;
+      * Limiti dimensione/numero, scansione antimalware (ClamAV/servizio),
+        elaborazione immagini che ri-codifica (strip metadata/EXIF);
+      * Mai servire upload da stesso origin dell'app con Content-Type
+        sniffabile: usare dominio separato (es. usercontent-example.net),
+        Content-Disposition: attachment dove appropriato, nosniff;
+      * Nessuna esecuzione: no handler script nella directory upload, no
+        include dinamico di percorsi controllati dall'utente.
+  - Temporanei: /tmp per-processo (tmpfs `noexec,nosuid`), pulizia, nome
+    random, permessi 0600; no file di sessione in webroot.
+  - Account separati: utente per runtime web (no shell, no sudo), utente per
+    deploy (solo pipeline), utente DB per app (DML minimale), utente DB per
+    migrazioni (DDL, usato solo in deploy), utente backup read-only.
+  - Permessi filesystem: codice 0755/0644 owner root (non scrivibile dal
+    runtime); config 0640 owner root:app; chiavi 0400; umask 027.
+
+15.1 SISTEMA OPERATIVO (Linux server)
+  [CRITICAL] Patch automatiche di sicurezza (unattended-upgrades/dnf-automatic)
+             + finestra di patch per kernel (live patching o riavvii
+             pianificati); SLA: critiche <= 7 gg, alte <= 30 gg (sul web
+             esposto le zero-day RCE sono immediate).
+  [CRITICAL] Immagini base minime e hardened (CIS benchmark L1/L2, OS minimal
+             o container-optimized OS), no pacchetti inutili (compilatori,
+             strumenti di rete, editor non necessari).
+  [HIGH]     Disco cifrato (LUKS/EBS KMS), swap cifrata o disabilitata per
+             segreti.
+  [HIGH]     SELinux enforcing / AppArmor attivo con profili per servizi.
+  [HIGH]     sysctl: rp_filter, no ip_forward (se non router), no source route,
+             no redirect, dmesg_restrict, kptr_restrict, ptrace_scope=1,
+             protected_hardlinks/symlinks, fs.suid_dumpable=0, unprivileged_bpf
+             disabled.
+  [HIGH]     auditd con regole per exec, modifiche a /etc, sudo, chiavi,
+             cambio permessi, montaggi; inoltro al SIEM.
+  [MEDIUM]   Mount: /tmp /var/tmp /dev/shm con noexec,nosuid,nodev; /home
+             nosuid.
+  [MEDIUM]   Account: no login root, no password login, utenti nominali,
+             sudo con log, scadenza account.
+  [MEDIUM]   Servizi: disabilita tutto cio' che non serve (cups, avahi,
+             rpcbind, telnet, ftp, smb, snmp v1/v2) -> `ss -tulpn` pulito.
+  [MEDIUM]   Tempo: chrony con NTS; Logging remoto.
+  [LOW]      Banner/MOTD senza info; core dump disabilitati.
+
+15.2 WEB SERVER / REVERSE PROXY (Nginx/Apache/HAProxy)
+  [CRITICAL] Esegui come utente non privilegiato (worker); master senza privilegi
+             extra dove possibile; chroot/namespace/container.
+  [CRITICAL] server_tokens off / ServerTokens Prod; rimuovi X-Powered-By; no
+             directory listing; no autoindex; no moduli non usati.
+  [CRITICAL] Host default che chiude (444/reject handshake); server_name
+             esplicito; blocca file nascosti (location ~ /\. { deny all; }).
+  [HIGH]     Timeout/limiti: client_max_body_size, header buffers, timeouts,
+             limit_conn, limit_req (sez. 4.2/10).
+  [HIGH]     Solo metodi necessari; TRACE off; CORS esplicito.
+  [HIGH]     Log access/error su stdout/JSON -> SIEM; no log in webroot.
+  [MEDIUM]   HTTP/2 hardening, limiti stream/richieste per connessione;
+             disabilita HTTP/1.0 se possibile.
+  [MEDIUM]   Moduli WAF (ModSecurity/Coraza + CRS) in modalita' graduale.
+  [LOW]      Personalizzazione pagine errore generiche.
+
+15.3 CONTAINER / ORCHESTRATORE
+  [CRITICAL] Immagini minimali (distroless/alpine/chainguard), da registry
+             privato, pinnate per digest, scansionate (Trivy/Grype), firmate
+             (cosign) e verificate in admission (Kyverno/OPA Gatekeeper).
+  [CRITICAL] Non-root (runAsNonRoot, UID alto), no privileged, no hostNetwork/
+             hostPID/hostPath, no docker.sock montato, drop ALL capabilities,
+             allowPrivilegeEscalation=false, seccomp RuntimeDefault, AppArmor/
+             SELinux, readOnlyRootFilesystem.
+  [HIGH]     Network policy default-deny per namespace; mesh mTLS; egress
+             controllato.
+  [HIGH]     Secrets via secret manager/CSI driver (non in env var visibili
+             nelle spec, non baked nell'immagine); rotazione.
+  [HIGH]     Limiti risorse (CPU/mem/pids/ephemeral-storage) -> anti DoS locale.
+  [HIGH]     API server e kubelet MAI pubblici; RBAC minimo; audit log; Pod
+             Security Standards "restricted"; aggiornamenti cluster.
+  [MEDIUM]   Runtime detection (Falco/Tetragon); sandbox (gVisor/Kata) per
+             carichi non fidati (es. conversione file utente).
+
+15.4 RUNTIME APPLICATIVO (Node/Python/Java/PHP/.NET)
+  [CRITICAL] Debug/dev mode OFF, dipendenze di produzione solo; versione runtime
+             supportata e patchata.
+  [CRITICAL] Nessuna esecuzione di input utente (eval, exec, deserializzazione
+             non fidata, template injection): linter/SAST bloccanti.
+  [HIGH]     PHP: disable_functions (exec, system, passthru, shell_exec, proc_
+             open, popen, ...), open_basedir, expose_php=Off,
+             display_errors=Off, allow_url_include=Off, upload_tmp_dir
+             dedicata, session.cookie_* sicuri. Java/.NET: no endpoint
+             management esposti (Actuator limitati). Node: no `--inspect`
+             esposto; Python: no debugger Werkzeug.
+  [HIGH]     Librerie di sicurezza (anti-CSRF, sanitizzazione, ORM). Moduli
+             crittografici standard (no crypto fatto in casa).
+  [MEDIUM]   Memory/timeouts di processo, worker recycling, health check.
+  [MEDIUM]   Variabili d'ambiente: solo non sensibili in env; segreti da
+             secret manager a runtime; mai loggare l'env; processi figli non
+             ereditano segreti inutili.
+
+15.5 DATABASE (es. PostgreSQL)
+  [CRITICAL] Mai esposto a Internet; listen solo su IP privato; firewall + pg_
+             hba.conf con `hostssl` e indirizzi specifici, scram-sha-256.
+  [CRITICAL] Utenti dedicati: app (SELECT/INSERT/UPDATE/DELETE su schema
+             specifico, NO DDL, NO superuser, NO COPY PROGRAM), migrazioni
+             separato, reporting read-only; Row Level Security per multi-
+             tenant dove opportuno.
+  [HIGH]     TLS obbligatorio (verify-full), cifratura a riposo (disco/TDE/
+             KMS), cifratura applicativa per campi molto sensibili.
+  [HIGH]     pgaudit/log connessioni/disconnessioni, DDL, ruoli; statement
+             timeout, idle_in_transaction timeout, connection limit per ruolo.
+  [HIGH]     Patch e minor update regolari; estensioni minime; no file access
+             da SQL (pg_read_server_files off per app).
+  [MEDIUM]   Replica/HA sicura; backup (sez. 17); mascheramento dati in
+             staging (mai copia grezza di prod in dev/test).
+
+15.6 SSH E ACCESSO REMOTO
+  [CRITICAL] Nessun SSH pubblico; accesso via ZTNA/bastion/SSM.
+  [CRITICAL] sshd_config: PermitRootLogin no; PasswordAuthentication no;
+             KbdInteractiveAuthentication no; PubkeyAuthentication yes;
+             AllowUsers/AllowGroups; MaxAuthTries 3; LoginGraceTime 20;
+             ClientAliveInterval/CountMax; X11Forwarding no; AllowTcpForwarding
+             no (salvo bastion); PermitTunnel no; chiavi ed25519(-sk) o
+             certificati SSH a vita breve; protocolli/cipher moderni; log
+             VERBOSE.
+  [HIGH]     fail2ban/crowdsec su bastion (solo se esposto); MFA sul
+             bastion; session recording.
+  [MEDIUM]   Chiavi host in inventario, rotazione; no agent forwarding non
+             necessario.
+
+15.7 FIREWALL E SERVIZI DI SISTEMA
+  [CRITICAL] Default deny (sez. 6) con IaC e drift detection.
+  [HIGH]     Servizi di sistema (systemd): `NoNewPrivileges=yes`,
+             `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,
+             `CapabilityBoundingSet=`, `RestrictAddressFamilies`,
+             `SystemCallFilter=@system-service`, `ReadWritePaths` minimi.
+  [MEDIUM]   Cron/timer: inventario, owner, log; nessuno script scrivibile da
+             utenti non fidati.
+  [MEDIUM]   Strumenti: lynis, OpenSCAP/CIS-CAT in CI per verifica periodica.
+
+15.8 SEGRETI E VARIABILI D'AMBIENTE
+  - Secret manager (Vault, AWS Secrets Manager/SSM, GCP Secret Manager, Azure
+    Key Vault) + KMS/HSM per chiavi; accesso per identita' di workload (IAM
+    role, SPIFFE), non credenziali statiche.
+  - Credenziali di breve durata (dynamic secrets DB, token STS); rotazione
+    automatica 30-90 gg o all'uso; revoca immediata su sospetto.
+  - Niente segreti in: repository, immagini, log, Dockerfile ARG/ENV, CI log,
+    URL, crash report. Scansione segreti (gitleaks/trufflehog) + pre-commit.
+  - `.env` solo per sviluppo locale, escluso da git, mai nel deploy.
+  - Separazione per ambiente: segreti diversi dev/stage/prod, nessun riuso.
+  - Cifratura, ruoli, auditing di ogni lettura segreto.
+  SE COMPROMESSO: un segreto trapelato deve essere ruotabile in minuti
+    (runbook), con inventario di dove e' usato.
+
+================================================================================
+16. CI/CD SECURITY
+================================================================================
+
+16.1 PIPELINE
+
+  Developer
+     | (commit firmati, MFA, device gestito)
+     v
+  Repository (branch protection, review obbligatoria, CODEOWNERS)
+     |
+     v
+  CI/CD (runner effimeri, rete isolata, OIDC verso cloud, no segreti statici)
+     |
+     v
+  Security checks: secret scan -> SAST -> SCA/dependency -> IaC scan -> unit/
+                   integration tests -> license check
+     |
+     v
+  Build (riproducibile, hermetic, base image pinnata)
+     |
+     v
+  Container scan + SBOM (CycloneDX/SPDX) + provenance (SLSA) + firma (cosign)
+     |
+     v
+  Artifact registry privato (immutabile, tag per digest)
+     |
+     v
+  Deploy STAGING -> DAST + smoke + test sicurezza -> approvazione
+     |
+     v
+  Deploy PRODUCTION (canary/blue-green, admission controller verifica firma)
+     |
+     v
+  Production (monitoraggio, rollback automatico su errori/anomalie)
+
+16.2 CONTROLLI
+  [CRITICAL] Branch protection: PR obbligatoria, >= 1-2 review, status check
+             obbligatori, no force-push, commit firmati (gitsign/GPG), MFA per
+             tutti, CODEOWNERS per file sensibili (workflow, IaC, auth).
+  [CRITICAL] Secret scanning in pre-commit e in CI + push protection;
+             nessun segreto in repo. Se trapela: ruota subito.
+  [CRITICAL] Segregazione: chi scrive il codice non puo' rilasciare da solo in
+             prod; pipeline = unico percorso verso produzione.
+  [HIGH]     SAST (Semgrep/CodeQL/SonarQube) bloccante su severita' alta.
+  [HIGH]     SCA/dependency scanning (Dependabot/Renovate/OSV-Scanner/Snyk/
+             Trivy) con policy: patch critiche entro SLA; lockfile obbligatori;
+             verifica integrita' (hash), registry privato/mirror; protezione
+             da dependency confusion e typosquatting (scope/namespace
+             riservati); riduzione dipendenze.
+  [HIGH]     IaC scanning (Checkov/tfsec/KICS) per SG, IAM, bucket pubblici.
+  [HIGH]     Container scanning (Trivy/Grype) + SBOM + firma immagine + verifica
+             in admission; base image pinnata per digest e aggiornata.
+  [HIGH]     DAST (OWASP ZAP/Nuclei autorizzato) su staging con autenticazione;
+             test API da schema (Schemathesis).
+  [HIGH]     Runner effimeri e isolati; credenziali cloud via OIDC federato a
+             ruoli a minimo privilegio e a breve vita; azioni/plugin di terze
+             parti pinnati per SHA; limita `pull_request_target`/script da
+             fork non fidati; nessun segreto esposto ai PR da fork.
+  [HIGH]     Artifact: registry privato, immutabili, tag per digest; firma
+             (cosign/Sigstore) e verifica prima del deploy; provenance SLSA >= 2
+             /3 quando possibile.
+  [MEDIUM]   Pen test periodici; bug bounty/divulgazione responsabile
+             (security.txt).
+  [MEDIUM]   Separazione ambienti: dev/stage/prod in account/progetti/VPC
+             distinti, IAM separati, dati sintetici o mascherati in non-prod,
+             nessun accesso prod dai runner dev, config per ambiente.
+  [MEDIUM]   Rollback: release versionate, deploy blue/green o canary, DB
+             migration backward-compatible (expand/contract), rollback testato.
+  [LOW]      Reproducible builds, policy-as-code (OPA) sui deploy.
+
+  SE COMPROMESSO: pipeline compromessa -> firma artifact + provenance +
+    verifica in cluster + approvazioni + runner effimeri limitano l'impatto;
+    chiavi di firma in KMS/HSM; monitoraggio di deploy fuori pipeline.
+
+================================================================================
+17. BACKUP & DISASTER RECOVERY
+================================================================================
+
+17.1 STRATEGIA 3-2-1-1-0
+  - 3 copie, 2 supporti/servizi diversi, 1 off-site, 1 IMMUTABILE/offline,
+    0 errori nei test di restore.
+
+17.2 REQUISITI
+  - AUTOMATICI: snapshot DB + PITR/WAL continuo; backup file/object storage
+    versionato; configurazioni/IaC/segreti (cifrati) inclusi; schedulati, con
+    alert in caso di fallimento.
+  - CIFRATI: AES-256 con chiavi in KMS separato (non nello stesso account del
+    dato); chiavi di recovery in cassaforte offline (procedura documentata).
+  - IMMUTABILI: S3 Object Lock (compliance/governance), Azure immutable blob,
+    GCS retention lock, tape/air gap; protezione da cancellazione con MFA
+    delete/approvazione a due persone.
+  - SEPARATI: account/tenant/provider diverso, credenziali diverse; il sistema
+    di produzione puo' SCRIVERE ma non cancellare/modificare backup; nessun
+    accesso di produzione ai backup di altri periodi.
+  - RETENTION (esempio): orari 48 h, giornalieri 30 gg, settimanali 12 sett.,
+    mensili 12-24 mesi, annuali per obbligo normativo; allineare a GDPR
+    (diritto all'oblio: strategia di scadenza e cancellazione nei backup).
+  - TEST RESTORE: automatizzato mensile (restore in ambiente isolato +
+    verifica integrita'/checksum + smoke test), drill DR completo
+    semestrale/annuale, documentato; misura RTO/RPO reali.
+  - RANSOMWARE: backup immutabili + rete separata + rilevazione anomalie
+    (cambi massivi) + copie offline.
+
+17.3 RPO / RTO (obiettivi INDICATIVI, da concordare col business)
+  TIER   | SERVIZIO                         | RPO          | RTO
+  -------+----------------------------------+--------------+-----------------
+  Tier 1 | DB transazionale / auth / pagam. | <= 5 min     | <= 1-4 h
+         | (PITR + replica multi-AZ)        | (WAL)        |
+  Tier 2 | Applicazione stateless, API      | n/a (rebuild)| <= 1-2 h (IaC +
+         |                                  |              | artifact firmati)
+  Tier 3 | Upload/object storage            | <= 15-60 min | <= 4-8 h
+  Tier 4 | Log/analytics                    | <= 24 h      | <= 24-72 h
+  - Multi-AZ per alta disponibilita'; DR multi-regione (warm standby/pilot
+    light) per Tier 1 se il business lo richiede.
+  - Piano DR: runbook, ruoli, contatti, ordine di ripristino, comunicazione,
+    credenziali break-glass, decisioni di failover (anche DNS/edge), test.
+  PRIORITA': CRITICAL (backup cifrati+restore testato), HIGH (immutabili).
+  RISCHI RES.: backup corrotti non rilevati; chiavi perse; restore mai provato.
+  SE COMPROMESSO: se i backup sono raggiungibili dall'attaccante -> copia
+    immutabile/offline in account separato resta intatta; se perdi la chiave
+    -> escrow/offline backup della chiave.
+
+================================================================================
+18. THREAT MODEL
+================================================================================
+
+18.1 ASSET
+  A1 Dati utenti/PII e credenziali   A2 Codice e segreti   A3 Disponibilita'
+  A4 Integrita' di app e dati        A5 Piano admin/CI-CD  A6 Reputazione/SEO
+  A7 Chiavi crittografiche           A8 Log/audit          A9 Backup
+
+18.2 ATTORI
+  - Scanner/bot opportunistici - Credential stuffer - Attaccante mirato con
+    competenze - Botnet DDoS - Insider/ex dipendente - Fornitore/supply chain
+    compromessa - Utente malizioso autenticato - Provider (edge/cloud) o
+    sviluppatore compromesso.
+
+18.3 PRIVACY DEL TRAFFICO E METADATA (REALISTICO, requisito 18)
+
+  CANALE         | COSA PUO' ESPORRE                        | COME RIDURRE
+  ---------------+------------------------------------------+-------------------
+  DNS            | Nome host a resolver/ISP (query in       | DoH/DoT lato
+                 | chiaro); IP dell'edge (non origin);      | client (decide
+                 | record storici/TXT/MX possono rivelare   | l'utente); record
+                 | provider; subdomain enumeration; CT logs | proxati; no record
+                 | rivelano hostname                        | origin; email da
+                 |                                          | provider esterno;
+                 |                                          | wildcard cert per
+                 |                                          | non elencare host
+                 |                                          | interni
+  TLS            | SNI in chiaro (senza ECH) visibile a ISP/| ECH quando
+                 | rete; versione/cipher/JA3; certificato   | disponibile; TLS 1.3
+                 | (CN/SAN) e CT log pubblici               | (cert cifrato);
+                 |                                          | cert wildcard
+  HTTP headers   | Server, X-Powered-By, versioni, Via,     | Rimuovere/uniformare
+                 | X-Cache, X-Request-ID interni, header di | header; edge
+                 | debug, ETag con inode/mtime              | normalizza; ETag
+                 |                                          | neutro
+  Server banner  | Versione web server/OS/linguaggio        | server_tokens off,
+                 |                                          | banner custom
+  Error page     | Stack trace, path, SQL, versione fw,     | Pagine generiche,
+                 | hostname interni                         | debug off, id
+                 |                                          | correlazione
+  Cookie         | Nome cookie rivela framework (PHPSESSID, | Nomi neutri
+                 | JSESSIONID, laravel_session), ID         | (__Host-sid); no
+                 | prevedibili, dati nel cookie             | dati nel cookie
+  URL            | ID sequenziali, token/email in query,    | UUID/ID opachi,
+                 | path rivelano tecnologia (/wp-content)   | token in header/
+                 |                                          | body, riscrivere
+                 |                                          | path, POST per dati
+                 |                                          | sensibili
+  Source map/JS  | Codice sorgente, endpoint interni,       | Non pubblicare map
+                 | commenti, chiavi API nel bundle          | in prod, minify,
+                 |                                          | no segreti nel
+                 |                                          | client
+  API responses  | Campi extra, ID interni, messaggi di     | Response filtering,
+                 | errore dettagliati, differenze di tempo/ | errori uniformi, no
+                 | messaggi (user enumeration), GraphQL     | introspezione prod,
+                 | introspection                            | limiti verbose
+  Metadata file  | EXIF (GPS, device), autore documenti     | Strip metadata
+                 |                                          | all'upload/download
+
+  CHI VEDE COSA (onesto):
+  - L'EDGE PROVIDER vede il traffico in chiaro (host, URL, header, body,
+    cookie, IP client) e il tuo traffico verso l'origin. E' un attore fidato.
+  - L'ISP del client / reti intermedie vedono IP di destinazione (l'edge),
+    SNI (salvo ECH), volumi e tempi -- non il contenuto.
+  - L'APPLICAZIONE/ORIGIN vede il contenuto e l'IP client risolto (se l'edge
+    lo passa). Puoi anonimizzare/troncare l'IP nei log se non serve.
+  - I CERTIFICATE TRANSPARENCY LOG rendono pubblici gli hostname dei cert
+    pubblici: non mettere nomi sensibili/interni in cert pubblici.
+  - I registri WHOIS/DNS, gli IP dell'edge e gli ASN sono pubblici.
+  - L'origin NON puo' essere "nascosto per sempre": e' protetto da controllo
+    d'accesso (firewall + mTLS), non da segretezza.
+  - Lato client: la correlazione per fingerprint/analytics resta possibile;
+    nessuna architettura server garantisce anonimato dell'utente.
+  - Cosa DEVE restare visibile: hostname, IP edge, esistenza del servizio,
+    funzionalita' pubbliche, dimensione/tempi delle risposte.
+  COMPROMESSI: troppa offuscazione ostacola debug/operazioni; privilegiare
+  controlli di accesso reali, non "security through obscurity".
+
+18.4 MODELLO ZERO TRUST (requisito 19) - APPLICAZIONE
+  - Never trust, always verify: ogni richiesta (anche interna) e' autenticata,
+    autorizzata e cifrata; nessuna fiducia basata su "rete interna".
+  - Least privilege: ruoli e IAM minimi, egress limitato, token con scope
+    stretti, accessi JIT.
+  - Autenticazione esplicita: utenti (SSO+MFA), servizi (mTLS/SPIFFE,
+    workload identity), device (posture, certificati device).
+  - Segmentazione: zone + network policy + micro-segmentazione.
+  - Verifica continua: rivalutazione del rischio per sessione (posizione,
+    device, comportamento), revoca dinamica; policy-as-code.
+  - Identita' utente/device: IdP centrale, device gestiti per admin, certificati
+    device, EDR.
+  - Credenziali a vita breve: token minuti, cert ore, SSH cert, dynamic DB
+    credentials, ruoli temporanei.
+
+18.5 MINACCE PRINCIPALI (STRIDE-like) E CONTROLLI
+
+  # | MINACCIA                         | CONTROLLI PRIMARI              | SE IL CONTROLLO CADE...
+  --+----------------------------------+--------------------------------+------------------------
+  1 | Bypass edge/accesso diretto      | FW allowlist, mTLS, tunnel     | WAF origin + rate limit
+    | all'origin                       |                                | locale + alert P1
+  2 | IP origin trapelato              | Nessun record, mail esterna,   | Firewall+mTLS rendono
+    |                                  | IP ruotabile, scan periodici   | inutile; rotazione IP
+  3 | SQLi / RCE / XSS                 | Codice sicuro, ORM, CSP, WAF   | Utente DB minimo, non-
+    |                                  |                                | root, FS read-only, EDR
+  4 | Request smuggling / header spoof | Parser strict, no XFF fidato,  | Autorizzazione app
+    |                                  | trusted proxy                  | indipendente da header
+  5 | DDoS volumetrico / L7            | Edge DDoS, cache, rate limit   | Degrado controllato,
+    |                                  |                                | multi-CDN, pagina static
+  6 | Credential stuffing / brute      | Rate limit, MFA/passkey,       | Alert + reset forzato
+    |                                  | breach check, bot mgmt         | account compromessi
+  7 | BOLA/IDOR, authZ rotta           | AuthZ per oggetto, test        | Audit, anomaly detection
+  8 | Furto sessione/token             | HttpOnly, TLS, rotazione,      | Revoca, binding, short TTL
+    |                                  | CSP, short TTL                 |
+  9 | Upload malevolo / web shell      | Storage separato, noexec,      | EDR/FIM, FS read-only,
+    |                                  | allowlist, AV                  | egress block
+ 10 | Compromissione admin             | ZTNA, MFA hw, JIT, audit       | Audit immutabile, four-
+    |                                  |                                | eyes, revoca rapida
+ 11 | Supply chain (dipendenze/CI)     | SCA, SBOM, firma, pin, OIDC    | Admission policy, rollback,
+    |                                  |                                | segmentazione
+ 12 | Furto segreti/chiavi             | Secret mgr, KMS, rotazione     | Rotazione rapida, scope
+    |                                  |                                | limitato, alert uso
+ 13 | Ransomware/cancellazione         | Backup immutabili, offline     | Restore testato
+ 14 | Misconfigurazione cloud/infra    | IaC, scan, drift detection     | Alert, policy as code
+ 15 | Insider                          | Least privilege, audit, 4-eyes | Log immutabili
+ 16 | Compromissione provider edge     | Cifratura app-layer dati       | Failover multi-CDN,
+    |                                  | sensibili, firma webhook, 2FA  | DNS rapido
+ 17 | Subdomain takeover / DNS hijack  | Registrar lock, CAA, scan DNS  | Alert CT/DNS, rollback
+ 18 | Esfiltrazione dati               | DLP/egress allowlist, query    | Detection volumi, revoca
+    |                                  | limits, segmentazione          | credenziali
+ 19 | Log tampering                    | WORM, account separato, hash   | Alert "log silence"
+ 20 | SSRF verso metadata/interni      | IMDSv2, egress allowlist,      | Segmentazione, ruoli minimi
+    |                                  | validazione URL, no redirect   |
+
+18.6 RISCHI RESIDUI (accettati/consapevoli)
+  - Zero-day su componenti (edge, proxy, runtime): mitigato da patching rapido,
+    segmentazione e rilevazione, non eliminabile.
+  - Attacchi DDoS L7 sofisticati e botnet residenziali: degrado possibile.
+  - Phishing e ingegneria sociale: mitigati da passkey/hw key, non azzerati.
+  - Fiducia nel provider edge/cloud e nel IdP.
+  - Errori umani/configurazione: mitigati da IaC, review, test automatici.
+  - Dipendenza da servizi terzi (SaaS) con proprio profilo di rischio.
+
+================================================================================
+19. SECURITY TESTING PLAN (SOLO SU SISTEMI DI TUA PROPRIETA' O AUTORIZZATI)
+================================================================================
+
+19.0 REGOLE D'INGAGGIO
+  - Autorizzazione scritta/ambito (target, finestra temporale, tecniche vietate,
+    contatti di emergenza). Notifica al provider edge/cloud dove richiesto
+    (molti consentono test senza preavviso, DoS/stress sono spesso esclusi).
+  - Preferire STAGING con dati sintetici; in produzione solo test non
+    distruttivi e concordati. Mai test DoS reali su infrastrutture condivise
+    senza accordo esplicito.
+  - Registrare evidenze, ora, tool, esito; correggere e ritestare.
+
+19.1 CHECKLIST DI TEST
+
+  AREA                    | TEST (cosa verificare)                      | ATTESO
+  ------------------------+---------------------------------------------+--------
+  Bypass reverse proxy /  | Dall'esterno: connessione diretta a IP/porte| Timeout/
+  accesso diretto origin  | dell'origin (scan porte, curl --resolve con | reject;
+                          | Host corretto); ricerca IP origin (storico  | nessuna
+                          | DNS, CT, mail header, Shodan/Censys sul     | risposta
+                          | tuo ASN, sottodomini); IPv6 incluso         |
+  Bypass WAF              | Payload benigni/malevoli di test (OWASP     | Bloccati
+                          | ZAP, test CRS, payload encoding doppio,     | o rifiutati
+                          | HPP, JSON/multipart/chunked); verificare    | dall'origin
+                          | che l'origin applichi il WAF locale         | senza edge
+  Spoofing IP / XFF       | Invia X-Forwarded-For/Forwarded/X-Real-IP   | IP loggato
+                          | falsi attraverso l'edge e direttamente al   | = reale;
+                          | proxy (se raggiungibile): rate limit e log  | header
+                          | devono usare l'IP vero                      | ignorati
+  Manipolazione header    | Host/X-Forwarded-Host/Proto, header         | Rifiuto o
+                          | duplicati, CL.TE/TE.CL (smuggling, es. con  | normaliz-
+                          | strumenti dedicati), HTTP/2 downgrade,      | zazione;
+                          | header oversize, CRLF injection             | no desync
+  TLS configuration       | testssl.sh / sslyze / Qualys SSL Labs:      | Solo TLS
+                          | versioni, cipher, HSTS, redirect, OCSP,     | 1.2/1.3,
+                          | catena, scadenza, downgrade; verifica mTLS  | A/A+; mTLS
+                          | origin (senza cert client -> rifiuto)       | richiesto
+  Rate-limit bypass       | Rotazione IP/XFF, varianti URL (case, /, ?, | Limiti
+                          | %2e), diversi metodi, header/UA, parallel   | coerenti
+                          | HTTP/2, endpoint alternativi                | per account
+  API authorization       | BOLA/IDOR (cambia ID), BFLA (funzioni       | 403/404
+                          | admin con token utente), mass assignment,   | corretti
+                          | scope token, JWT (alg none, kid, expiry,    |
+                          | audience), refresh riuso, CORS              |
+  Session security        | Flag cookie, fixation, rotazione, logout,   | Sessioni
+                          | idle/absolute timeout, CSRF, replay token,  | invalidate
+                          | concurrent sessions, reset password flow    | correttam.
+  Access control          | Verticale/orizzontale, forced browsing,     | Deny by
+                          | admin da rete esterna/non-ZTNA, method      | default
+                          | tampering, tenant isolation                 |
+  File upload             | Estensioni doppie, content-type spoof,      | Rifiutati
+                          | polyglot, SVG/HTML con script, path         | o neutra-
+                          | traversal nel nome, file enormi, zip bomb,  | lizzati;
+                          | esecuzione dal path di upload, EICAR (AV)   | no exec
+  Security headers        | securityheaders.com / Mozilla Observatory / | A+ e CSP
+                          | verifica CSP (report-only), cookie flags   | senza
+                          |                                             | unsafe
+  Info exposure           | Banner, error page, 404/500, stack trace,   | Nessuna
+                          | /.git /.env /backup /server-status, source | info
+                          | map, directory listing, robots/sitemap,     | sensibile
+                          | API verbose, GraphQL introspection          |
+  Firewall configuration  | Scan porte esterno/interno (nmap) per ogni  | Solo flussi
+                          | zona; test flussi negati (proxy->DB, app->  | di matrice
+                          | Internet, DB->Internet); IPv6                | sez. 6
+  DDoS/Resilienza         | (Concordato) test di carico controllato su  | Degrado
+                          | staging; simulare edge failure/failover     | controllato
+  Container/host          | CIS benchmark, Trivy/Grype, escape tests    | Pass
+                          | (privileged), kube-bench, lynis             |
+  CI/CD & supply chain    | Segreti nei log/repo, PR da fork, permessi  | Nessuna
+                          | runner, dependency confusion (test in       | esposizione
+                          | ambiente controllato), firma artifact       |
+  Backup/DR               | Restore completo, test immutabilita',       | RTO/RPO
+                          | simulazione ransomware (staging)            | rispettati
+  Logging/Alerting        | Genera eventi (login falliti, WAF, admin)   | Alert
+                          | e verifica che arrivino al SIEM e attivino  | ricevuti
+                          | alert; tentativo di cancellare log          | in <5 min
+
+19.2 STRUMENTI (esempi, uso autorizzato)
+  nmap, curl, testssl.sh, sslyze, OWASP ZAP, Burp Suite (licenza), Nuclei,
+  nikto, ffuf/feroxbuster (solo su tuo sistema), sqlmap (solo staging),
+  h2spec/smuggler (test HTTP), Schemathesis, trivy, grype, kube-bench, lynis,
+  ScoutSuite/Prowler (cloud), gitleaks, semgrep.
+
+19.3 CADENZA
+  - Ad ogni release: SAST/SCA/DAST automatici su staging.
+  - Mensile: scan vulnerabilita', test bypass origin/WAF, revisione regole.
+  - Trimestrale: test restore, review accessi, tabletop incident response.
+  - Annuale (o dopo cambi architetturali): penetration test esterno
+    indipendente, drill DR, revisione threat model.
+
+================================================================================
+20. IMPLEMENTATION ROADMAP
+================================================================================
+
+FASE 0 - PREPARAZIONE (settimana 0-1)
+  - Inventario asset/domini/IP/sottodomini, owner, dati e classificazione.
+  - Definire RPO/RTO, requisiti normativi (GDPR, PCI se pagamenti, NIS2...).
+  - Account/ruoli: MFA su registrar, DNS, edge, cloud, repo, CI/CD, IdP.
+  - Repo IaC, convenzioni, ambienti separati.
+
+FASE 1 - CRITICAL: BLINDARE IL PERIMETRO (settimana 1-3)
+  1. Registrar lock + MFA hw; DNS provider; DNSSEC; CAA; rimuovere record che
+     espongono l'IP origin; mail transazionale da provider esterno.
+  2. Proxare tutto dietro l'edge (CDN/WAF/DDoS) in modalita' Full (strict);
+     redirect HTTPS; HSTS (max-age basso all'inizio).
+  3. Origin: firewall default deny, allowlist edge (o tunnel), chiudi tutto il
+     resto, SSH non pubblico (ZTNA/SSM). Verifica dall'esterno (sez. 19).
+  4. mTLS edge->origin (Authenticated Origin Pulls / CA privata) +
+     default_server che rifiuta Host/SNI sconosciuti.
+  5. Real IP/XFF: trusted proxy, sanitizzazione header, log doppi.
+  6. WAF edge in detection -> blocking su categorie ad alta confidenza; regole
+     custom file sensibili (/.env, /.git ...).
+  7. Rate limit su login/reset/registrazione/MFA (edge + app).
+  8. Debug off, error page generiche, rimozione banner/header, no stack trace.
+  9. Backup automatici cifrati + primo test di restore.
+  10. Log centralizzati minimi (edge, proxy, app, auth, admin audit).
+  USCITA FASE 1: origin non raggiungibile direttamente, admin non pubblico,
+  WAF/DDoS attivi, backup verificati.
+
+FASE 2 - HIGH: DEFENSE-IN-DEPTH (settimana 3-8)
+  1. WAF origin (ModSecurity/Coraza + CRS) in graduale; tuning FP.
+  2. Segmentazione di rete completa (proxy/app/db/admin/log/backup) + egress
+     control + nftables/host firewall + IaC con drift detection.
+  3. TLS interno/mTLS tra servizi; DB con TLS e utenti least-privilege.
+  4. Sessioni/cookie sicuri, CSRF, CSP (report-only -> enforce), header di
+     sicurezza.
+  5. API gateway, schema validation, authZ per oggetto, JWT corti + refresh
+     rotation + revoca.
+  6. Admin: ZTNA + MFA hardware + RBAC + audit append-only + JIT.
+  7. SIEM, alert (sez. 14.4), time sync, retention, log immutabili.
+  8. Hardening OS/web/container/DB/SSH (sez. 15) con scansioni CIS.
+  9. Secret manager + rotazione; rimozione segreti da repo/immagini.
+  10. CI/CD sicura: branch protection, secret scan, SAST, SCA, container scan,
+      OIDC, separazione ambienti.
+  11. Backup immutabili in account separato; DR runbook.
+
+FASE 3 - MEDIUM: MATURITA' (mesi 2-4)
+  1. Bot management avanzato, anomaly detection, SOAR leggero (ban temporanei
+     automatici con scadenza).
+  2. DAST in pipeline, test API automatici, firma artifact + SBOM +
+     provenance; admission control (verifica firma).
+  3. Service mesh/SPIFFE, certificati di breve durata, dynamic DB credentials.
+  4. Passkey/WebAuthn per utenti; breach-password check; step-up auth.
+  5. Honeypot/deception (token canary), monitoraggio CT/DNS/typosquatting.
+  6. DR drill completo; multi-AZ; test failover edge/DNS.
+  7. Primo penetration test esterno; remediation; ritest.
+
+FASE 4 - ADVANCED HARDENING (mesi 4-12)
+  1. Multi-CDN / multi-provider DNS; multi-regione per Tier 1.
+  2. Sandbox/microVM (Firecracker/gVisor) per carichi non fidati.
+  3. HSM/KMS dedicato; cifratura a livello di campo per dati critici.
+  4. Reproducible builds, SLSA 3; policy-as-code ovunque.
+  5. Red team/purple team, bug bounty, esercizi incident response.
+  6. ECH, Trusted Types, COOP/COEP dove sensato; privacy engineering
+     (anonimizzazione IP nei log, retention minimizzata).
+  7. Revisione continua: threat model, regole WAF, accessi, dipendenze.
+
+KPI / METRICHE DI SUCCESSO
+  - Origin raggiungibile direttamente: 0 richieste non-edge accettate.
+  - % traffico via edge: 100%. Copertura MFA admin: 100%.
+  - Tempo patch critiche (MTTR vulnerabilita'): <= 7 gg.
+  - MTTD/MTTR incidenti; falsi positivi WAF; risultati test restore (RTO/RPO).
+  - % segreti ruotati nei tempi; % deploy firmati/verificati.
+
+RUNBOOK INCIDENT (sintesi)
+  1. Rileva/triage (severita', ambito) 2. Contieni (isola, revoca credenziali/
+  sessioni, regole WAF, kill-switch) 3. Preserva evidenze (snapshot, log) 4.
+  Eradica (patch, rimozione persistenza) 5. Ripristina (da artifact firmati/
+  backup puliti) 6. Comunica (interno, utenti, autorita' - GDPR 72 h se data
+  breach) 7. Post-mortem senza colpe, azioni correttive, aggiorna threat model.
+
+================================================================================
+A. DOMANDE APERTE PER PERSONALIZZARE IL PROGETTO
+================================================================================
+  1. Stack e hosting: quale cloud/provider (AWS/Azure/GCP/dedicato/VPS), quale
+     CDN/edge hai o preferisci, e quale stack applicativo (linguaggio/framework,
+     DB, container/K8s o VM)?
+  2. Tipo di dati e conformita': quali dati tratti (solo account, pagamenti,
+     dati sanitari...) e quali obblighi (GDPR, PCI DSS, NIS2, ISO 27001)? Quanto
+     e' critico il downtime (RPO/RTO desiderati)?
+  Utili anche: schema attuale (diagramma/IaC), elenco domini/sottodomini,
+  presenza di upload o admin panel esistenti, budget e team (chi gestisce
+  operations/on-call).
+
+================================================================================
+NOTA FINALE SUI LIMITI
+================================================================================
+Questo documento e' un progetto di riferimento: va adattato al tuo contesto,
+testato in staging, e rivisto periodicamente. Nessuna combinazione di controlli
+garantisce sicurezza assoluta: l'obiettivo e' rendere gli attacchi costosi,
+rilevabili e contenibili, con ripristino rapido. Ogni misura qui indicata ha un
+piano "se cade" proprio perche' ciascun livello deve poter essere compromesso
+senza che l'intero sistema lo sia.
+================================================================================
